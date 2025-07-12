@@ -19,10 +19,11 @@ class ClaudeAgentHandler(BaseHTTPRequestHandler):
             
             output = "Mocked Claude response: Code refactored successfully."
             print(f"[DEBUG] Hardcoded Claude output: {output}")
+            print(f"[DEBUG] Type of output: {type(output)}")
 
             response_data = {
                 "jsonrpc": "2.0",
-                "result": "Mocked Claude response: Code refactored successfully.",
+                "result": output,
                 "id": message_id
             }
         else:
