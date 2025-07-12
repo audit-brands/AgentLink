@@ -199,3 +199,56 @@ The Agent-to-Agent (A2A) protocol, backed by Google and now under the Linux Foun
 *   **Debugging Tools:** How do we trace and inspect inter-agent messages and failures?
 *   **Agent Lifecycle Management:** What happens when agents crash, update, or are hot-swapped?
 *   **Language Interop:** Should agents agree on a canonical SDK?
+
+## Proof of Concept: Gemini CLI + Claude Code CLI
+
+To validate the IACP and A2A integration, a focused Proof of Concept (PoC) will be developed using the existing Gemini CLI and Claude Code CLI agents. This approach offers several advantages:
+
+### Why Gemini CLI + Claude CLI is a Great PoC:
+
+*   **Real Agents, Real Value:** Both are actively used tools, and the PoC aims to transform them into collaborators, addressing a tangible pain point.
+*   **Human-in-the-Middle Friction is Visible:** The current manual relay of information between these agents highlights the clear value an A2A integration will provide.
+*   **Controlled Environment:** As these agents run locally, their input/output wrappers can be easily adapted without external API dependencies or vendor restrictions.
+*   **Low-Stakes Prototyping:** The focus is on testing interoperability, not building a global standard, allowing for rapid iteration.
+
+### PoC Goal:
+
+Enable Gemini to hand off a task to Claude (or vice versa) using A2A-style messaging over a local protocol.
+
+### Minimum Architecture:
+
+| Component         | Description                                                                                             |
+| :---------------- | :------------------------------------------------------------------------------------------------------ |
+| `gemini-agent.py` | A small wrapper that reads from an A2A-style message queue, runs the Gemini CLI, and returns output.    |
+| `claude-agent.py` | Same concept but for Claude CLI.                                                                        |
+| `a2a-mediator.py` | A simple A2A-style message broker – initially using JSON files or TaskWarrior, evolving to UNIX socket-based server. |
+
+### Recommended First Steps (P0):
+
+1.  **Wrap Gemini and Claude CLI into callable Python scripts:** Abstract their invocation (input → CLI → output) to be callable like `./run_gemini.py --task "Refactor this code"`.
+2.  **Build a lightweight message relay:** Start with a shared JSON queue or use TaskWarrior as a source of truth. Each agent will poll or watch the queue for messages with a simple schema (e.g., `{"from": "gemini", "to": "claude", "type": "RequestExplanation", "payload": "output from Gemini here"}`).
+3.  **Implement agent polling/dispatching logic:** Each agent will run a loop to read messages addressed to them, process them via their respective CLIs, and post responses back to the shared queue.
+
+### Phased A2A Adoption:
+
+*   **P0 (Current):** Local task handoff with JSON (TaskWarrior or file queue).
+*   **P1:** Adopt A2A-style message format (JSON-RPC via Python or `aiohttp`).
+*   **P2:** Introduce Agent Cards & discovery (`.well-known/agent.json`, local HTTP).
+*   **P3:** Add streaming/events (SSE).
+*   **P4:** Add authentication, structured schema, observability (Full A2A stack).
+
+### Tooling Support:
+
+*   Python (with `subprocess`, `json`, `aiohttp`)
+*   A2A Python SDK (from P1/P2 onwards)
+*   TaskWarrior (as a stand-in message queue for P0)
+
+### Summary: Where to Start (P0 Tasks):
+
+| Task                     | Priority | Description                                         |
+| :----------------------- | :------- | :-------------------------------------------------- |
+| Wrap Gemini CLI          | ✅ Now   | Standardize CLI input/output via Python             |
+| Wrap Claude CLI          | ✅ Now   | Same as above                                       |
+| Create JSON message relay | ✅ Now   | Filesystem-based or TaskWarrior-backed              |
+| Define simple message schema | ✅ Now   | Who → whom → what task → payload                    |
+| Enable one-direction flow | ✅ Now   | E.g., Gemini finishes task → Claude comments on it |
