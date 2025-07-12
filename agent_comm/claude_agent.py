@@ -49,7 +49,7 @@ def main():
                         print(f"[DEBUG] Response prepared: {response}")
 
                         # Write response to the sender's queue
-                        response_queue_file = f"message_queue/inbound_{params.get("from")}.json"
+                        response_queue_file = f"message_queue/inbound_{params.get('from')}.json"
                         print(f"[DEBUG] Writing response to: {response_queue_file}")
                         with open(response_queue_file, 'w') as out_f:
                             json.dump(response, out_f, indent=2)
