@@ -3,7 +3,7 @@ import json, subprocess, time, os
 QUEUE_FILE = 'message_queue/inbound_claude.json'
 
 def run_claude_cli(prompt):
-    cmd = ["claude", "--model", "claude-3-opus", "--print", prompt]
+    cmd = ["claude", "--model", "opus", "--print", prompt]
     result = subprocess.run(cmd, capture_output=True, text=True)
     return result.stdout.strip()
 
