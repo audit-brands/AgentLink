@@ -1,18 +1,16 @@
 import json
+from jsonrpcclient import request
+import requests
 
-message = {
-    "jsonrpc": "2.0",
-    "method": "RequestRefactor",
-    "params": {
-        "from": "gemini",
-        "to": "claude",
-        "code_path": "src/utils/math.js",
-        "instruction": "Please refactor the function to improve readability."
-    },
-    "id": 1
-}
+# Define the JSON-RPC request
+req = request("RequestRefactor", code_path="src/utils/math.js", instruction="Please refactor the function to improve readability.")
 
-with open("message_queue/inbound_claude.json", "w") as f:
-    json.dump(message, f, indent=2)
-
-print(" Task sent to Claude.")
+# Send the request to the Claude agent server
+try:
+    response = requests.post("http://localhost:5000", json=req)
+    response.raise_for_status() # Raise an exception for HTTP errors
+    print(f"Response from Claude: {response.json()}")
+except requests.exceptions.ConnectionError:
+    print("Error: Could not connect to Claude agent. Is it running?")
+except requests.exceptions.RequestException as e:
+    print(f"An error occurred: {e}")

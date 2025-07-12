@@ -1,84 +1,21 @@
-import json, subprocess, time, os
+import json
+from jsonrpcserver import method, serve
 
-QUEUE_FILE = 'message_queue/inbound_claude.json'
-
+# Mocked Claude CLI function
 def run_claude_cli(prompt):
     print(f"[MOCK] Claude CLI received prompt: {prompt}")
     return "Mocked Claude response: Code refactored successfully."
 
+@method
+def RequestRefactor(code_path, instruction):
+    print(" New refactor task received for Claude!")
+    prompt = f"Refactor the code at {code_path} with the following instruction: {instruction}"
+    output = run_claude_cli(prompt)
+    return {"from": "claude", "type": "TaskCompleted", "payload": output}
+
 def main():
-    print("Claude agent is running...")
-    last_modified_time = 0
-    while True:
-        try:
-            current_modified_time = os.path.getmtime(QUEUE_FILE) if os.path.exists(QUEUE_FILE) else 0
-
-            if current_modified_time > last_modified_time and os.path.getsize(QUEUE_FILE) > 0:
-                print(f"[DEBUG] {QUEUE_FILE} has been modified. Processing...")
-                last_modified_time = current_modified_time
-
-                with open(QUEUE_FILE, 'r+') as f:
-                    try:
-                        data = json.load(f)
-                        print(f"[DEBUG] Data loaded: {data}")
-                    except json.JSONDecodeError:
-                        print(f"[DEBUG] JSONDecodeError in {QUEUE_FILE}. Clearing file.")
-                        f.seek(0)
-                        f.truncate()
-                        json.dump({}, f)
-                        print(f"Warning: {QUEUE_FILE} contained invalid JSON. Cleared.")
-                        continue
-
-                    if data and data.get("jsonrpc") == "2.0":
-                        method = data.get("method")
-                        params = data.get("params", {})
-                        message_id = data.get("id")
-                        print(f"[DEBUG] Method: {method}, Params: {params}, ID: {message_id}")
-
-                        if method == "RequestRefactor":
-                            print(" New refactor task received for Claude!")
-                            code_path = params.get("code_path")
-                            instruction = params.get("instruction")
-                            
-                            # Mocked response instead of CLI call
-                            output = "Mocked Claude response: Code refactored successfully."
-                            print(f"[DEBUG] Mocked Claude CLI output: {output}")
-
-                            response = {
-                                "jsonrpc": "2.0",
-                                "result": {
-                                    "from": "claude",
-                                    "to": params.get("from"),
-                                    "type": "TaskCompleted",
-                                    "payload": output
-                                },
-                                "id": message_id
-                            }
-                            print(f"[DEBUG] Response prepared: {response}")
-
-                            # Write response to the sender's queue
-                            response_queue_file = f"message_queue/inbound_{params.get('from')}.json"
-                            print(f"[DEBUG] Writing response to: {response_queue_file}")
-                            with open(response_queue_file, 'w') as out_f:
-                                json.dump(response, out_f, indent=2)
-
-                            # Clear the current queue file after processing
-                            print(f"[DEBUG] Attempting to clear {QUEUE_FILE}")
-                            with open(QUEUE_FILE, 'w') as f_clear:
-                                json.dump({}, f_clear)
-                            print(f"[DEBUG] Cleared {QUEUE_FILE}")
-                            last_modified_time = os.path.getmtime(QUEUE_FILE) # Update last modified time after clearing
-                    else:
-                        print(f"[DEBUG] No valid JSON-RPC message found in {QUEUE_FILE}")
-            elif not os.path.exists(QUEUE_FILE):
-                print(f"[DEBUG] {QUEUE_FILE} not found. Creating it.")
-                with open(QUEUE_FILE, 'w') as f:
-                    json.dump({}, f)
-                last_modified_time = os.path.getmtime(QUEUE_FILE) # Update after creation
-
-        except Exception as e:
-            print(f"An unexpected error occurred in Claude agent: {e}")
-        time.sleep(1) # Shorter sleep for more active polling
+    print("Claude agent (JSON-RPC Server) is running on http://localhost:5000")
+    serve(port=5000)
 
 if __name__ == "__main__":
     main()
