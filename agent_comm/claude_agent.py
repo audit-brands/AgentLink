@@ -1,16 +1,12 @@
 import json
 from jsonrpcserver import method, serve
 
-# Mocked Claude CLI function
-def run_claude_cli(prompt):
-    print(f"[MOCK] Claude CLI received prompt: {prompt}")
-    return "Mocked Claude response: Code refactored successfully."
-
 @method
 def RequestRefactor(code_path, instruction):
     print(" New refactor task received for Claude!")
-    prompt = f"Refactor the code at {code_path} with the following instruction: {instruction}"
-    output = run_claude_cli(prompt)
+    print(f"[DEBUG] Code path: {code_path}, Instruction: {instruction}")
+    output = "Mocked Claude response: Code refactored successfully."
+    print(f"[DEBUG] Hardcoded Claude output: {output}")
     return output
 
 def main():
