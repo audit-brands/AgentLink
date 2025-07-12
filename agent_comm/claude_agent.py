@@ -3,9 +3,8 @@ import json, subprocess, time, os
 QUEUE_FILE = 'message_queue/inbound_claude.json'
 
 def run_claude_cli(prompt):
-    cmd = ["claude", "--model", "opus", "--print", prompt]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    return result.stdout.strip()
+    print(f"[MOCK] Claude CLI received prompt: {prompt}")
+    return "Mocked Claude response: Code refactored successfully."
 
 def main():
     print("Claude agent is running...")

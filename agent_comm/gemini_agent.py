@@ -3,9 +3,8 @@ import json, subprocess, time, os
 QUEUE_FILE = 'message_queue/inbound_gemini.json'
 
 def run_gemini_cli(prompt):
-    cmd = ["genai", "chat", "--model", "gemini-pro", "--prompt", prompt]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    return result.stdout.strip()
+    print(f"[MOCK] Gemini CLI received prompt: {prompt}")
+    return "Mocked Gemini response: Code reviewed and approved."
 
 def main():
     print("Gemini agent is running...")
