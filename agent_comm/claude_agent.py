@@ -22,7 +22,7 @@ class ClaudeAgentHandler(BaseHTTPRequestHandler):
 
             response_data = {
                 "jsonrpc": "2.0",
-                "result": output,
+                "result": "Mocked Claude response: Code refactored successfully.",
                 "id": message_id
             }
         else:

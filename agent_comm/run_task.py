@@ -12,6 +12,7 @@ req = request("RequestRefactor", params={
 try:
     response = requests.post("http://localhost:5000", json=req)
     response.raise_for_status() # Raise an exception for HTTP errors
+    print(f"Raw Response from Claude: {response.text}")
     print(f"Response from Claude: {response.json()}")
 except requests.exceptions.ConnectionError:
     print("Error: Could not connect to Claude agent. Is it running?")
