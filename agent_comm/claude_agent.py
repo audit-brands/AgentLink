@@ -15,7 +15,7 @@ class ClaudeAgentHandler(BaseHTTPRequestHandler):
             message_id = request_data.get("id")
 
             print(" New refactor task received for Claude!")
-            print(f"[DEBUG] Code path: {params.get("code_path")}, Instruction: {params.get("instruction")}")
+            print(f"[DEBUG] Code path: {params.get('code_path')}, Instruction: {params.get('instruction')}")
             
             output = "Mocked Claude response: Code refactored successfully."
             print(f"[DEBUG] Hardcoded Claude output: {output}")
