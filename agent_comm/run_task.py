@@ -3,7 +3,10 @@ from jsonrpcclient import request
 import requests
 
 # Define the JSON-RPC request
-req = request("RequestRefactor", code_path="src/utils/math.js", instruction="Please refactor the function to improve readability.")
+req = request("RequestRefactor", params={
+    "code_path": "src/utils/math.js",
+    "instruction": "Please refactor the function to improve readability."
+})
 
 # Send the request to the Claude agent server
 try:
