@@ -38,7 +38,7 @@ def main():
             discover_agent(agent_info)
         print("[REGISTRY] Current Registered Agents:")
         for agent_id, info in REGISTERED_AGENTS.items():
-            print(f"  - {agent_id}: Status={info["status"]}, Capabilities={info["capabilities"]}")
+            print(f"  - {agent_id}: Status={info['status']}, Capabilities={info['capabilities']}")
         time.sleep(5)
 
 if __name__ == "__main__":
