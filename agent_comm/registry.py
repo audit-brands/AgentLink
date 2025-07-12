@@ -23,7 +23,7 @@ def discover_agent(agent_info):
             "capabilities": agent_card.get("capabilities", []),
             "status": "active"
         }
-        print(f"[REGISTRY] Discovered and registered agent: {agent_id} with capabilities {REGISTERED_AGENTS[agent_id]["capabilities"]}")
+        print(f"[REGISTRY] Discovered and registered agent: {agent_id} with capabilities {REGISTERED_AGENTS[agent_id]['capabilities']}")
     except requests.exceptions.RequestException as e:
         if agent_id in REGISTERED_AGENTS:
             REGISTERED_AGENTS[agent_id]["status"] = "inactive"
