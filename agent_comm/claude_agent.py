@@ -11,7 +11,7 @@ def RequestRefactor(code_path, instruction):
     print(" New refactor task received for Claude!")
     prompt = f"Refactor the code at {code_path} with the following instruction: {instruction}"
     output = run_claude_cli(prompt)
-    return {"from": "claude", "type": "TaskCompleted", "payload": output}
+    return output
 
 def main():
     print("Claude agent (JSON-RPC Server) is running on http://localhost:5000")
