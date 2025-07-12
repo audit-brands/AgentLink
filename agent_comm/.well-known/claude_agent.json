@@ -1,0 +1,7 @@
+{
+  "id": "claude-agent",
+  "capabilities": [
+    "RequestRefactor"
+  ],
+  "endpoint": "http://localhost:5000"
+}

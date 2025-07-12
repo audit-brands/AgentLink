@@ -2,6 +2,18 @@ import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 class ClaudeAgentHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/.well-known/agent.json":
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            with open('./.well-known/claude_agent.json', 'rb') as f:
+                self.wfile.write(f.read())
+        else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b'Not Found')
+
     def do_POST(self):
         content_length = int(self.headers['Content-Length'])
         post_data = self.rfile.read(content_length)
