@@ -3,7 +3,7 @@ import json, subprocess, time, os
 QUEUE_FILE = 'message_queue/inbound_claude.json'
 
 def run_claude_cli(prompt):
-    cmd = ["claude", "--model", "claude-3-opus", "--prompt", prompt]
+    cmd = ["claude", "--model", "claude-3-opus", "--print", prompt]
     result = subprocess.run(cmd, capture_output=True, text=True)
     return result.stdout.strip()
 
@@ -24,17 +24,21 @@ def main():
                         time.sleep(2)
                         continue
 
+                    print(f"[DEBUG] Data loaded: {data}")
                     if data and data.get("jsonrpc") == "2.0":
                         method = data.get("method")
                         params = data.get("params", {})
                         message_id = data.get("id")
+                        print(f"[DEBUG] Method: {method}, Params: {params}, ID: {message_id}")
 
                         if method == "RequestRefactor":
                             print(" New refactor task received for Claude!")
                             code_path = params.get("code_path")
                             instruction = params.get("instruction")
                             prompt = f"Refactor the code at {code_path} with the following instruction: {instruction}"
+                            print(f"[DEBUG] Running Claude CLI with prompt: {prompt}")
                             output = run_claude_cli(prompt)
+                            print(f"[DEBUG] Claude CLI output: {output}")
 
                             response = {
                                 "jsonrpc": "2.0",
@@ -46,6 +50,7 @@ def main():
                                 },
                                 "id": message_id
                             }
+                            print(f"[DEBUG] Response prepared: {response}")
 
                         # Write response to the sender's queue
                         with open(f"message_queue/inbound_{data['from']}.json", 'w') as out_f:
