@@ -8,25 +8,32 @@ def run_gemini_cli(prompt):
 
 def main():
     print("Gemini agent is running...")
+    last_modified_time = 0
     while True:
         try:
-            if os.path.exists(QUEUE_FILE) and os.path.getsize(QUEUE_FILE) > 0:
+            current_modified_time = os.path.getmtime(QUEUE_FILE) if os.path.exists(QUEUE_FILE) else 0
+
+            if current_modified_time > last_modified_time and os.path.getsize(QUEUE_FILE) > 0:
+                print(f"[DEBUG] {QUEUE_FILE} has been modified. Processing...")
+                last_modified_time = current_modified_time
+
                 with open(QUEUE_FILE, 'r+') as f:
                     try:
                         data = json.load(f)
+                        print(f"[DEBUG] Data loaded: {data}")
                     except json.JSONDecodeError:
-                        # File is not valid JSON, clear it or handle as error
+                        print(f"[DEBUG] JSONDecodeError in {QUEUE_FILE}. Clearing file.")
                         f.seek(0)
                         f.truncate()
                         json.dump({}, f)
                         print(f"Warning: {QUEUE_FILE} contained invalid JSON. Cleared.")
-                        time.sleep(2)
                         continue
 
                     if data and data.get("jsonrpc") == "2.0":
                         method = data.get("method")
                         params = data.get("params", {})
                         message_id = data.get("id")
+                        print(f"[DEBUG] Method: {method}, Params: {params}, ID: {message_id}")
 
                         if method == "RequestRefactor": # Example method, will expand later
                             print(" New refactor task received for Gemini!")
@@ -45,28 +52,31 @@ def main():
                                 },
                                 "id": message_id
                             }
+                            print(f"[DEBUG] Response prepared: {response}")
 
-                        # Write response to the sender's queue
-                        response_queue_file = f"message_queue/inbound_{params.get('from')}.json"
-                        with open(response_queue_file, 'w') as out_f:
-                            json.dump(response, out_f, indent=2)
+                            # Write response to the sender's queue
+                            response_queue_file = f"message_queue/inbound_{params.get('from')}.json"
+                            print(f"[DEBUG] Writing response to: {response_queue_file}")
+                            with open(response_queue_file, 'w') as out_f:
+                                json.dump(response, out_f, indent=2)
 
-                        # Clear the current queue file after processing
-                        f.seek(0)
-                        f.truncate()
-                        json.dump({}, f)
-            else:
-                # Ensure the file exists and is an empty JSON object if it's new or empty
+                            # Clear the current queue file after processing
+                            print(f"[DEBUG] Attempting to clear {QUEUE_FILE}")
+                            with open(QUEUE_FILE, 'w') as f_clear:
+                                json.dump({}, f_clear)
+                            print(f"[DEBUG] Cleared {QUEUE_FILE}")
+                            last_modified_time = os.path.getmtime(QUEUE_FILE) # Update last modified time after clearing
+                    else:
+                        print(f"[DEBUG] No valid JSON-RPC message found in {QUEUE_FILE}")
+            elif not os.path.exists(QUEUE_FILE):
+                print(f"[DEBUG] {QUEUE_FILE} not found. Creating it.")
                 with open(QUEUE_FILE, 'w') as f:
                     json.dump({}, f)
+                last_modified_time = os.path.getmtime(QUEUE_FILE) # Update after creation
 
-        except FileNotFoundError:
-            # Create the file if it doesn't exist
-            with open(QUEUE_FILE, 'w') as f:
-                json.dump({}, f)
         except Exception as e:
             print(f"An unexpected error occurred in Gemini agent: {e}")
-        time.sleep(2)
+        time.sleep(1) # Shorter sleep for more active polling
 
 if __name__ == "__main__":
     main()
