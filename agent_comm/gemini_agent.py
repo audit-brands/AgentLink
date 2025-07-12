@@ -15,7 +15,7 @@ class GeminiAgentHandler(BaseHTTPRequestHandler):
             message_id = request_data.get("id")
 
             print(" New refactor task received for Gemini!")
-            print(f"[DEBUG] Code path: {params.get("code_path")}, Instruction: {params.get("instruction")}")
+            print(f"[DEBUG] Code path: {params.get('code_path')}, Instruction: {params.get('instruction')}")
             
             output = "Mocked Gemini response: Code reviewed and approved."
             print(f"[DEBUG] Hardcoded Gemini output: {output}")
