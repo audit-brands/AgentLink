@@ -24,16 +24,28 @@ def main():
                         time.sleep(2)
                         continue
 
-                    if data:
-                        print(" New task received for Gemini!")
-                        output = run_gemini_cli(data['payload'])
+                    if data and data.get("jsonrpc") == "2.0":
+                        method = data.get("method")
+                        params = data.get("params", {})
+                        message_id = data.get("id")
 
-                        response = {
-                            "from": "gemini",
-                            "to": data['from'],
-                            "type": "TaskCompleted",
-                            "payload": output
-                        }
+                        if method == "RequestRefactor": # Example method, will expand later
+                            print(" New refactor task received for Gemini!")
+                            code_path = params.get("code_path")
+                            instruction = params.get("instruction")
+                            prompt = f"Refactor the code at {code_path} with the following instruction: {instruction}"
+                            output = run_gemini_cli(prompt)
+
+                            response = {
+                                "jsonrpc": "2.0",
+                                "result": {
+                                    "from": "gemini",
+                                    "to": params.get("from"),
+                                    "type": "TaskCompleted",
+                                    "payload": output
+                                },
+                                "id": message_id
+                            }
 
                         # Write response to the sender's queue
                         with open(f"message_queue/inbound_{data['from']}.json", 'w') as out_f:

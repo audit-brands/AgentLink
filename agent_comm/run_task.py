@@ -1,10 +1,15 @@
 import json
 
 message = {
-    "from": "gemini",
-    "to": "claude",
-    "type": "RequestRefactor",
-    "payload": "Please refactor the function in src/utils/math.js to improve readability."
+    "jsonrpc": "2.0",
+    "method": "RequestRefactor",
+    "params": {
+        "from": "gemini",
+        "to": "claude",
+        "code_path": "src/utils/math.js",
+        "instruction": "Please refactor the function to improve readability."
+    },
+    "id": 1
 }
 
 with open("message_queue/inbound_claude.json", "w") as f:
