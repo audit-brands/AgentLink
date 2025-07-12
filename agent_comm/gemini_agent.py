@@ -47,7 +47,8 @@ def main():
                             }
 
                         # Write response to the sender's queue
-                        with open(f"message_queue/inbound_{data['from']}.json", 'w') as out_f:
+                        response_queue_file = f"message_queue/inbound_{params.get('from')}.json"
+                        with open(response_queue_file, 'w') as out_f:
                             json.dump(response, out_f, indent=2)
 
                         # Clear the current queue file after processing
