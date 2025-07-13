@@ -9,11 +9,23 @@ const PORT = 5000;
 
 app.use(express.json());
 
-// Mocked Claude CLI function
 function runClaudeCli(prompt: string): Promise<string> {
-    return new Promise((resolve) => {
-        console.log(`[MOCK] Claude CLI received prompt: ${prompt}`);
-        resolve("Mocked Claude response: Code refactored successfully.");
+    return new Promise((resolve, reject) => {
+        const command = `${path.resolve(__dirname, '../claude-cli')} "${prompt}"`;
+        console.log(`[EXEC] Running Claude CLI command: ${command}`);
+
+        exec(command, (error, stdout, stderr) => {
+            if (error) {
+                console.error(`[EXEC] Claude CLI execution error: ${error.message}`);
+                reject(new Error(`Claude CLI execution failed: ${stderr || error.message}`));
+                return;
+            }
+            if (stderr) {
+                console.warn(`[EXEC] Claude CLI stderr: ${stderr}`);
+            }
+            console.log(`[EXEC] Claude CLI stdout: ${stdout}`);
+            resolve(stdout.trim()); // Trim whitespace from output
+        });
     });
 }
 
@@ -31,8 +43,8 @@ app.post('/', async (req: Request, res: Response) => {
         console.log(" New refactor task received for Claude!");
         console.log(`[DEBUG] Code path: ${params.code_path}, Instruction: ${params.instruction}`);
         
-        const output = await runClaudeCli(`Refactor the code at ${params.code_path} with the following instruction: ${params.instruction}`);
-        console.log(`[DEBUG] Hardcoded Claude output: ${output}`);
+        const output = await runClaudeCli(params.instruction);
+        console.log(`[DEBUG] Output before responseData assignment: ${output}`);
 
         responseData = {
             jsonrpc: "2.0",

@@ -9,11 +9,23 @@ const PORT = 5001;
 
 app.use(express.json());
 
-// Mocked Gemini CLI function
 function runGeminiCli(prompt: string): Promise<string> {
-    return new Promise((resolve) => {
-        console.log(`[MOCK] Gemini CLI received prompt: ${prompt}`);
-        resolve("Mocked Gemini response: Code reviewed and approved.");
+    return new Promise((resolve, reject) => {
+        const command = `${path.resolve(__dirname, '../gemini-cli')} "${prompt}"`;
+        console.log(`[EXEC] Running Gemini CLI command: ${command}`);
+
+        exec(command, (error, stdout, stderr) => {
+            if (error) {
+                console.error(`[EXEC] Gemini CLI execution error: ${error.message}`);
+                reject(new Error(`Gemini CLI execution failed: ${stderr || error.message}`));
+                return;
+            }
+            if (stderr) {
+                console.warn(`[EXEC] Gemini CLI stderr: ${stderr}`);
+            }
+            console.log(`[EXEC] Gemini CLI stdout: ${stdout}`);
+            resolve(stdout.trim()); // Trim whitespace from output
+        });
     });
 }
 
@@ -31,8 +43,8 @@ app.post('/', async (req: Request, res: Response) => {
         console.log(" New refactor task received for Gemini!");
         console.log(`[DEBUG] Code path: ${params.code_path}, Instruction: ${params.instruction}`);
         
-        const output = await runGeminiCli(`Refactor the code at ${params.code_path} with the following instruction: ${params.instruction}`);
-        console.log(`[DEBUG] Hardcoded Gemini output: ${output}`);
+        const output = await runGeminiCli(params.instruction);
+        console.log(`[DEBUG] Output before responseData assignment: ${output}`);
 
         responseData = {
             jsonrpc: "2.0",
@@ -58,7 +70,8 @@ app.get('/.well-known/agent.json', (req: Request, res: Response) => {
         if (err) {
             console.error("Error reading agent.json:", err);
             res.status(404).send("Not Found");
-        } else {
+        }
+        else {
             res.setHeader('Content-Type', 'application/json');
             res.send(data);
         }
