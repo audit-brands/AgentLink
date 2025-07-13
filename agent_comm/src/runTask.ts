@@ -23,7 +23,7 @@ async function runTask() {
         console.log(`Parsed JSON Response from Gemini: ${JSON.stringify(response.data)}`);
 
     } catch (error: any) {
-        if (axios.isAxiosError(error)) {
+        if (error.isAxiosError) {
             if (error.response) {
                 console.error(`Error: HTTP Status ${error.response.status}, Data: ${JSON.stringify(error.response.data)}`);
             } else if (error.request) {
