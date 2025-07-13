@@ -53,7 +53,7 @@ app.post('/', async (req: Request, res: Response) => {
 
 // Serve .well-known/agent.json
 app.get('/.well-known/agent.json', (req: Request, res: Response) => {
-    const agentJsonPath = path.join(__dirname, '..', '.well-known', 'claude_agent.json');
+    const agentJsonPath = './.well-known/claude_agent.json';
     fs.readFile(agentJsonPath, 'utf8', (err, data) => {
         if (err) {
             console.error("Error reading agent.json:", err);
