@@ -38,7 +38,7 @@ async function discoverAgent(agentInfo: AgentInfo) {
         };
         console.log(`[REGISTRY] Discovered and registered agent: ${agentId} with capabilities ${REGISTERED_AGENTS[agentId].capabilities}`);
     } catch (error: any) {
-        if (axios.isAxiosError(error)) {
+        if (error.isAxiosError) {
             if (agentId in REGISTERED_AGENTS) {
                 REGISTERED_AGENTS[agentId].status = "inactive";
                 console.log(`[REGISTRY] Agent ${agentId} became inactive: ${error.message}`);
