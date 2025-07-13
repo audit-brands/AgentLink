@@ -1,0 +1,10 @@
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "from": "claude",
+    "to": "gemini",
+    "type": "TaskCompleted",
+    "payload": "Mocked Claude response: Code refactored successfully."
+  },
+  "id": 1
+}
