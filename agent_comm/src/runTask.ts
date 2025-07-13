@@ -14,13 +14,11 @@ async function runTask() {
     try {
         // Send request to Claude agent (port 5000)
         let response = await axios.post("http://localhost:5000", requestPayload);
-        response.raiseForStatus(); // Axios throws for non-2xx status codes by default
         console.log(`Raw Response from Claude: ${JSON.stringify(response.data)}`);
         console.log(`Parsed JSON Response from Claude: ${JSON.stringify(response.data)}`);
 
         // Send request to Gemini agent (port 5001)
         response = await axios.post("http://localhost:5001", requestPayload);
-        response.raiseForStatus();
         console.log(`Raw Response from Gemini: ${JSON.stringify(response.data)}`);
         console.log(`Parsed JSON Response from Gemini: ${JSON.stringify(response.data)}`);
 
