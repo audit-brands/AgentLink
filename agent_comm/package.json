@@ -4,6 +4,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "start:claude": "node dist/claudeAgent.js",
+    "start:gemini": "node dist/geminiAgent.js",
+    "start:task": "node dist/runTask.js",
+    "build": "tsc",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
