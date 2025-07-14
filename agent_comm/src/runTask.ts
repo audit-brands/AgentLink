@@ -1,14 +1,32 @@
 import axios from 'axios';
 import { strict as assert } from 'assert';
+import { agentRegistry } from './registry';
+
+interface JsonRpcRequest {
+    jsonrpc: "2.0";
+    method: string;
+    params?: any;
+    id: number | string | null;
+}
 
 interface JsonRpcResponse {
-    jsonrpc: string;
+    jsonrpc: "2.0";
     result?: any;
-    error?: { code: number; message: string; };
-    id: number;
+    error?: { code: number; message: string; data?: any };
+    id: number | string | null;
 }
 
 async function runTask() {
+    await agentRegistry.discoverAgents();
+
+    const claudeAgent = agentRegistry.getAgent('claude-agent');
+    const geminiAgent = agentRegistry.getAgent('gemini-agent');
+
+    if (!claudeAgent || !geminiAgent) {
+        console.error("Could not discover all agents. Make sure they are running.");
+        return;
+    }
+
     const requestPayload = {
         jsonrpc: "2.0",
         method: "RequestRefactor",
@@ -20,15 +38,23 @@ async function runTask() {
     };
 
     try {
-        // Send request to Claude agent (port 5000)
-        let response = await axios.post<JsonRpcResponse>("http://localhost:5000", requestPayload);
+        // Send request to Claude agent
+        let response = await axios.post<JsonRpcResponse>(claudeAgent.endpoint, requestPayload);
         console.log(`Raw Response from Claude: ${JSON.stringify(response.data)}`);
-        console.log(`Parsed JSON Response from Claude: Claude CLI output for: echo this back from Claude`);
+        if (response.data.error) {
+            console.error(`JSON-RPC Error from Claude: Code ${response.data.error.code}, Message: ${response.data.error.message}, Data: ${JSON.stringify(response.data.error.data)}`);
+        } else {
+            console.log(`Parsed JSON Response from Claude: ${response.data.result}`);
+        }
 
-        // Send request to Gemini agent (port 5001)
-        response = await axios.post<JsonRpcResponse>("http://localhost:5001", requestPayload);
+        // Send request to Gemini agent
+        response = await axios.post<JsonRpcResponse>(geminiAgent.endpoint, requestPayload);
         console.log(`Raw Response from Gemini: ${JSON.stringify(response.data)}`);
-        console.log(`Parsed JSON Response from Gemini: ${response.data.result}`);
+        if (response.data.error) {
+            console.error(`JSON-RPC Error from Gemini: Code ${response.data.error.code}, Message: ${response.data.error.message}, Data: ${JSON.stringify(response.data.error.data)}`);
+        } else {
+            console.log(`Parsed JSON Response from Gemini: ${response.data.result}`);
+        }
 
     } catch (error: any) {
         if (error.isAxiosError) {

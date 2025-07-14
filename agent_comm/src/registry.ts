@@ -1,9 +1,5 @@
-import axios from 'axios';
-
-interface AgentInfo {
-    id: string;
-    endpoint: string;
-}
+import * as fs from 'fs/promises';
+import * as path from 'path';
 
 interface AgentCard {
     id: string;
@@ -11,59 +7,38 @@ interface AgentCard {
     endpoint: string;
 }
 
-interface RegisteredAgent {
-    endpoint: string;
-    capabilities: string[];
-    status: "active" | "inactive";
-}
+class AgentRegistry {
+    private registry: Map<string, AgentCard> = new Map();
+    private wellKnownDir: string;
 
-const AGENTS: AgentInfo[] = [
-    { id: "claude-agent", endpoint: "http://localhost:5000" },
-    { id: "gemini-agent", endpoint: "http://localhost:5001" }
-];
+    constructor(wellKnownDir: string) {
+        this.wellKnownDir = wellKnownDir;
+    }
 
-const REGISTERED_AGENTS: { [key: string]: RegisteredAgent } = {};
-
-async function discoverAgent(agentInfo: AgentInfo) {
-    const { id: agentId, endpoint } = agentInfo;
-    const agentJsonUrl = `${endpoint}/.well-known/agent.json`;
-    
-    try {
-        const response = await axios.get<AgentCard>(agentJsonUrl, { timeout: 2000 });
-        const agentCard = response.data;
-        REGISTERED_AGENTS[agentId] = {
-            endpoint: endpoint,
-            capabilities: agentCard.capabilities || [],
-            status: "active"
-        };
-        console.log(`[REGISTRY] Discovered and registered agent: ${agentId} with capabilities ${REGISTERED_AGENTS[agentId].capabilities}`);
-    } catch (error: any) {
-        if (error.isAxiosError) {
-            if (agentId in REGISTERED_AGENTS) {
-                REGISTERED_AGENTS[agentId].status = "inactive";
-                console.log(`[REGISTRY] Agent ${agentId} became inactive: ${error.message}`);
-            } else {
-                console.log(`[REGISTRY] Agent ${agentId} is not reachable: ${error.message}`);
+    public async discoverAgents(): Promise<void> {
+        try {
+            const files = await fs.readdir(this.wellKnownDir);
+            for (const file of files) {
+                if (file.endsWith('_agent.json')) {
+                    const filePath = path.join(this.wellKnownDir, file);
+                    const content = await fs.readFile(filePath, 'utf-8');
+                    const agentCard: AgentCard = JSON.parse(content);
+                    this.registry.set(agentCard.id, agentCard);
+                    console.log(`Discovered agent: ${agentCard.id} at ${agentCard.endpoint}`);
+                }
             }
-        } else {
-            console.error(`[REGISTRY] An unexpected error occurred for ${agentId}:`, error);
+        } catch (error) {
+            console.error(`Error discovering agents: ${error}`);
         }
+    }
+
+    public getAgent(id: string): AgentCard | undefined {
+        return this.registry.get(id);
+    }
+
+    public listAgents(): AgentCard[] {
+        return Array.from(this.registry.values());
     }
 }
 
-async function main() {
-    console.log("[REGISTRY] Starting agent discovery service...");
-    while (true) {
-        for (const agentInfo of AGENTS) {
-            await discoverAgent(agentInfo);
-        }
-        console.log("[REGISTRY] Current Registered Agents:");
-        for (const agentId in REGISTERED_AGENTS) {
-            const info = REGISTERED_AGENTS[agentId];
-            console.log(`  - ${agentId}: Status=${info.status}, Capabilities=${info.capabilities.join(', ')}`);
-        }
-        await new Promise(resolve => setTimeout(resolve, 5000)); // Poll every 5 seconds
-    }
-}
-
-main();
+export const agentRegistry = new AgentRegistry(path.resolve(__dirname, '../.well-known'));
