@@ -139,8 +139,8 @@ export class ResourceManager extends EventEmitter {
                 processUsage: 0
             },
             storage: {
-                used: 0,  // Will be implemented with actual storage monitoring
-                free: 0
+                used: 0,
+                free: os.freemem() // Using system memory as fallback
             }
         };
     }

@@ -225,33 +225,28 @@ export class WorkflowEngine extends EventEmitter {
      * Handles workflow errors and initiates rollback if needed
      */
     private async handleWorkflowError(workflow: WorkflowState, error: unknown): Promise<void> {
-        workflow.status = WorkflowStatus.FAILED;
         workflow.error = error instanceof Error ? error.message : String(error);
         workflow.updatedAt = new Date();
-        await this.metricsService.updateMetrics(workflow.id, workflow);
-        this.workflows.set(workflow.id, workflow);
+
+        // Initiate rollback if enabled
+        if (workflow.definition.rollbackOnError) {
+            await this.rollbackWorkflow(workflow);
+        } else {
+            workflow.status = WorkflowStatus.FAILED;
+            await this.metricsService.updateMetrics(workflow.id, workflow);
+        }
 
         this.emit('workflow:failed', { 
             workflowId: workflow.id,
             workflow,
             error: workflow.error
         });
-
-        // Initiate rollback if enabled
-        if (workflow.definition.rollbackOnError) {
-            const originalStatus = workflow.status;
-            await this.rollbackWorkflow(workflow);
-            workflow.status = originalStatus; // Restore FAILED status after rollback
-            workflow.updatedAt = new Date();
-            await this.metricsService.updateMetrics(workflow.id, workflow);
-        }
     }
 
     /**
      * Rolls back workflow steps in reverse order
      */
     private async rollbackWorkflow(workflow: WorkflowState): Promise<void> {
-        const originalStatus = workflow.status;
         workflow.status = WorkflowStatus.ROLLING_BACK;
         this.emit('workflow:rollback:started', { workflowId: workflow.id });
 
