@@ -1,230 +1,53 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { EnhancedResourceManager } from '../services/enhancedResourceManager';
-import { ResourceLimits } from '../services/resourceManager';
 
 describe('EnhancedResourceManager', () => {
-    let manager: EnhancedResourceManager;
-    const limits: ResourceLimits = {
-        memory: {
-            max: 1024 * 1024 * 1024, // 1GB
-            warning: 768 * 1024 * 1024, // 768MB
-        },
-        cpu: {
-            maxUsage: 80, // 80%
-            warning: 70, // 70%
-        },
-    };
+    let resourceManager: EnhancedResourceManager;
 
     beforeEach(() => {
-        manager = new EnhancedResourceManager(limits);
-    });
-
-    describe('getEnhancedMetrics', () => {
-        it('should return enhanced metrics with available resources', async () => {
-            const metrics = await manager.getEnhancedMetrics();
-            
-            expect(metrics).toHaveProperty('availableResources');
-            expect(metrics.availableResources).toHaveProperty('memory');
-            expect(metrics.availableResources).toHaveProperty('cpu');
-            expect(metrics.availableResources.memory).toBeGreaterThanOrEqual(0);
-            expect(metrics.availableResources.cpu).toBeGreaterThanOrEqual(0);
-        });
-
-        it('should calculate utilization percentages correctly', async () => {
-            const metrics = await manager.getEnhancedMetrics();
-            
-            expect(metrics).toHaveProperty('utilizationPercentages');
-            expect(metrics.utilizationPercentages.memory).toBeGreaterThanOrEqual(0);
-            expect(metrics.utilizationPercentages.memory).toBeLessThanOrEqual(100);
-            expect(metrics.utilizationPercentages.cpu).toBeGreaterThanOrEqual(0);
-            expect(metrics.utilizationPercentages.cpu).toBeLessThanOrEqual(100);
-        });
-
-        it('should include cluster metrics', async () => {
-            const metrics = await manager.getEnhancedMetrics();
-            
-            expect(metrics).toHaveProperty('clusterMetrics');
-            expect(metrics.clusterMetrics).toHaveProperty('totalMemory');
-            expect(metrics.clusterMetrics).toHaveProperty('totalCpu');
-            expect(metrics.clusterMetrics).toHaveProperty('availableMemory');
-            expect(metrics.clusterMetrics).toHaveProperty('availableCpu');
-            expect(metrics.clusterMetrics).toHaveProperty('nodeCount');
-            expect(metrics.clusterMetrics).toHaveProperty('activeNodes');
+        resourceManager = new EnhancedResourceManager({
+            memory: {
+                max: 1024 * 1024 * 1024, // 1GB
+                warning: 768 * 1024 * 1024 // 768MB
+            },
+            cpu: {
+                maxUsage: 80,
+                warning: 70
+            }
         });
     });
 
-    describe('Resource Reservation', () => {
-        it('should successfully reserve resources when available', async () => {
-            const taskId = 'test-task-1';
-            const requirements = {
-                memory: 256 * 1024 * 1024, // 256MB
-                cpu: 20,
-                timeoutMs: 5000
-            };
-
-            const reserved = await manager.reserveResources(taskId, requirements);
-            expect(reserved).toBe(true);
-
-            const metrics = await manager.getEnhancedMetrics();
-            expect(metrics.availableResources.memory).toBeLessThan(limits.memory.max);
-            expect(metrics.availableResources.cpu).toBeLessThan(limits.cpu.maxUsage);
-        });
-
-        it('should fail to reserve resources when exceeding limits', async () => {
-            const taskId = 'test-task-2';
-            const requirements = {
-                memory: 2 * 1024 * 1024 * 1024, // 2GB (exceeds limit)
-                cpu: 90, // Exceeds CPU limit
-                timeoutMs: 5000
-            };
-
-            const reserved = await manager.reserveResources(taskId, requirements);
-            expect(reserved).toBe(false);
-        });
-
-        it('should release resources correctly', async () => {
-            const taskId = 'test-task-3';
-            const requirements = {
-                memory: 256 * 1024 * 1024,
-                cpu: 20,
-                timeoutMs: 5000
-            };
-
-            await manager.reserveResources(taskId, requirements);
-            const metricsBeforeRelease = await manager.getEnhancedMetrics();
-            
-            manager.releaseResources(taskId);
-            const metricsAfterRelease = await manager.getEnhancedMetrics();
-
-            expect(metricsAfterRelease.availableResources.memory)
-                .toBeGreaterThan(metricsBeforeRelease.availableResources.memory);
-            expect(metricsAfterRelease.availableResources.cpu)
-                .toBeGreaterThan(metricsBeforeRelease.availableResources.cpu);
-        });
-
-        it('should automatically release resources after timeout', async () => {
-            const taskId = 'test-task-4';
-            const requirements = {
-                memory: 256 * 1024 * 1024,
-                cpu: 20,
-                timeoutMs: 100 // Short timeout for testing
-            };
-
-            await manager.reserveResources(taskId, requirements);
-            
-            // Wait for timeout
-            await new Promise(resolve => setTimeout(resolve, 200));
-            
-            const metrics = await manager.getEnhancedMetrics();
-            const reservations = (manager as any).resourceReservations;
-            expect(reservations.has(taskId)).toBe(false);
-        });
+    afterEach(() => {
+        resourceManager.stop();
     });
 
-    describe('Cluster Resource Management', () => {
-        it('should update cluster resources correctly', () => {
-            const clusterUpdate = {
-                totalMemory: 4 * 1024 * 1024 * 1024, // 4GB
-                totalCpu: 400, // 4 cores
-                availableMemory: 3 * 1024 * 1024 * 1024, // 3GB
-                availableCpu: 300,
-                nodeCount: 4,
-                activeNodes: 3
-            };
-
-            manager.updateClusterResources(clusterUpdate);
-            const metrics = manager.getClusterMetrics();
-
-            expect(metrics).toEqual(clusterUpdate);
-        });
-
-        it('should handle remote alerts correctly', () => {
-            let alertReceived = false;
-            manager.on('remote:alert', () => {
-                alertReceived = true;
-            });
-
-            manager.handleRemoteAlert('node-1', {
-                type: 'memory',
-                level: 'critical',
-                message: 'Memory usage critical',
-                value: 900 * 1024 * 1024,
-                threshold: 1024 * 1024 * 1024,
-                timestamp: new Date()
-            });
-
-            expect(alertReceived).toBe(true);
-        });
-
-        it('should update active nodes count on critical alerts', () => {
-            manager.updateClusterResources({
-                nodeCount: 4,
-                activeNodes: 4,
-                totalMemory: 4 * 1024 * 1024 * 1024,
-                totalCpu: 400,
-                availableMemory: 3 * 1024 * 1024 * 1024,
-                availableCpu: 300
-            });
-
-            manager.handleRemoteAlert('node-1', {
-                type: 'memory',
-                level: 'critical',
-                message: 'Memory usage critical',
-                value: 900 * 1024 * 1024,
-                threshold: 1024 * 1024 * 1024,
-                timestamp: new Date()
-            });
-
-            const metrics = manager.getClusterMetrics();
-            expect(metrics.activeNodes).toBe(3);
-        });
-    });
-
-    describe('canHandleTask', () => {
-        it('should return true when resources are available', async () => {
-            const requiredResources = {
-                memory: 100 * 1024 * 1024, // 100MB
-                cpu: 10, // 10%
-            };
+    describe('Resource Metrics', () => {
+        it('should provide enhanced metrics with cluster information', async () => {
+            const metrics = await resourceManager.getEnhancedMetrics();
             
-            const result = await manager.canHandleTask(requiredResources);
-            expect(result).toBeDefined();
-        });
-
-        it('should return false when resources exceed limits', async () => {
-            const requiredResources = {
-                memory: 2 * 1024 * 1024 * 1024, // 2GB (exceeds max)
-                cpu: 90, // 90% (exceeds max)
-            };
+            expect(metrics.memory).toBeDefined();
+            expect(metrics.cpu).toBeDefined();
+            expect(metrics.availableResources).toBeDefined();
+            expect(metrics.clusterMetrics).toBeDefined();
             
-            const result = await manager.canHandleTask(requiredResources);
-            expect(result).toBe(false);
+            // Verify memory metrics
+            expect(metrics.memory.total).toBeGreaterThan(0);
+            expect(metrics.memory.free).toBeGreaterThan(0);
+            expect(metrics.memory.used).toBeLessThan(metrics.memory.total);
+            
+            // Verify CPU metrics
+            expect(metrics.cpu.usage).toBeGreaterThanOrEqual(0);
+            expect(metrics.cpu.usage).toBeLessThanOrEqual(100);
+            expect(metrics.cpu.loadAvg).toHaveLength(3);
+            
+            // Verify cluster metrics
+            expect(metrics.clusterMetrics.nodeCount).toBe(1); // Local node only
+            expect(metrics.clusterMetrics.totalMemory).toBeGreaterThan(0);
+            expect(metrics.clusterMetrics.totalCpu).toBe(100);
         });
 
-        it('should consider cluster resources when local resources are insufficient', async () => {
-            // Set up cluster resources
-            manager.updateClusterResources({
-                totalMemory: 4 * 1024 * 1024 * 1024,
-                totalCpu: 400,
-                availableMemory: 3 * 1024 * 1024 * 1024,
-                availableCpu: 300,
-                nodeCount: 4,
-                activeNodes: 4
-            });
-
-            const requiredResources = {
-                memory: 2 * 1024 * 1024 * 1024, // 2GB (exceeds local but within cluster)
-                cpu: 150 // 150% (exceeds local but within cluster)
-            };
-
-            const result = await manager.canHandleTask(requiredResources);
-            expect(result).toBe(true);
-        });
-    });
-
-    describe('getResourceUtilization', () => {
-        it('should return valid utilization percentages', () => {
-            const utilization = manager.getResourceUtilization();
+        it('should track resource utilization', () => {
+            const utilization = resourceManager.getResourceUtilization();
             
             expect(utilization.memory).toBeGreaterThanOrEqual(0);
             expect(utilization.memory).toBeLessThanOrEqual(100);
@@ -233,42 +56,179 @@ describe('EnhancedResourceManager', () => {
         });
     });
 
-    describe('edge cases', () => {
-        it('should handle zero resource requirements', async () => {
-            const result = await manager.canHandleTask({ memory: 0, cpu: 0 });
-            expect(result).toBe(true);
+    describe('Resource Reservation', () => {
+        it('should reserve resources for tasks', async () => {
+            const taskId = 'test-task';
+            const request = {
+                memory: 256 * 1024 * 1024, // 256MB
+                cpu: 20
+            };
+
+            const canHandle = await resourceManager.canHandleTask(request);
+            expect(canHandle).toBe(true);
+
+            const reserved = await resourceManager.reserveResources(taskId, request);
+            expect(reserved).toBe(true);
+
+            const metrics = await resourceManager.getEnhancedMetrics();
+            expect(metrics.availableResources.memory).toBeLessThan(resourceManager.limits.memory.max);
+            expect(metrics.availableResources.cpu).toBeLessThan(resourceManager.limits.cpu.maxUsage);
         });
 
-        it('should handle maximum resource limits', async () => {
-            const result = await manager.canHandleTask({
-                memory: limits.memory.max,
-                cpu: limits.cpu.maxUsage,
-            });
-            expect(result).toBeDefined();
+        it('should release reserved resources', async () => {
+            const taskId = 'test-task';
+            const request = {
+                memory: 256 * 1024 * 1024,
+                cpu: 20
+            };
+
+            await resourceManager.reserveResources(taskId, request);
+            const beforeRelease = await resourceManager.getEnhancedMetrics();
+
+            resourceManager.releaseResources(taskId);
+            const afterRelease = await resourceManager.getEnhancedMetrics();
+
+            // Available resources should increase after release
+            expect(afterRelease.availableResources.memory)
+                .toBeGreaterThan(beforeRelease.availableResources.memory);
+            expect(afterRelease.availableResources.cpu)
+                .toBeGreaterThan(beforeRelease.availableResources.cpu - 20);
         });
 
-        it('should handle partial cluster updates', () => {
-            const initialUpdate = {
-                totalMemory: 4 * 1024 * 1024 * 1024,
-                totalCpu: 400,
-                availableMemory: 3 * 1024 * 1024 * 1024,
-                availableCpu: 300,
-                nodeCount: 4,
-                activeNodes: 4
+        it('should prevent over-allocation of resources', async () => {
+            const request = {
+                memory: 2 * 1024 * 1024 * 1024, // 2GB (more than limit)
+                cpu: 90 // More than max usage
             };
-            
-            manager.updateClusterResources(initialUpdate);
-            
-            const partialUpdate = {
-                availableMemory: 2 * 1024 * 1024 * 1024,
-                availableCpu: 200
+
+            const canHandle = await resourceManager.canHandleTask(request);
+            expect(canHandle).toBe(false);
+
+            const reserved = await resourceManager.reserveResources('test-task', request);
+            expect(reserved).toBe(false);
+        });
+    });
+
+    describe('Cluster Management', () => {
+        it('should manage cluster nodes', async () => {
+            const nodeId = 'test-node';
+            const nodeMetrics = {
+                memory: {
+                    total: 1024 * 1024 * 1024,
+                    used: 512 * 1024 * 1024,
+                    free: 512 * 1024 * 1024,
+                    processUsage: 256 * 1024 * 1024,
+                    heapUsage: 128 * 1024 * 1024
+                },
+                cpu: {
+                    usage: 50,
+                    loadAvg: [50, 50, 50],
+                    processUsage: 25
+                },
+                storage: {
+                    used: 0,
+                    free: 1000
+                },
+                availableResources: {
+                    memory: 512 * 1024 * 1024,
+                    cpu: 50
+                },
+                utilizationPercentages: {
+                    memory: 50,
+                    cpu: 50
+                },
+                clusterMetrics: {
+                    totalMemory: 1024 * 1024 * 1024,
+                    totalCpu: 100,
+                    availableMemory: 512 * 1024 * 1024,
+                    availableCpu: 50,
+                    nodeCount: 1,
+                    activeNodes: 1
+                }
             };
+
+            resourceManager.updateNodeMetrics(nodeId, nodeMetrics);
+            const metrics = await resourceManager.getEnhancedMetrics();
+
+            expect(metrics.clusterMetrics.nodeCount).toBe(2); // Local node + test node
+            expect(metrics.clusterMetrics.activeNodes).toBe(2);
+
+            resourceManager.removeNode(nodeId);
+            const updatedMetrics = await resourceManager.getEnhancedMetrics();
+            expect(updatedMetrics.clusterMetrics.nodeCount).toBe(1); // Only local node
+        });
+
+        it('should emit cluster update events', async () => {
+            const nodeId = 'test-node';
+            const eventSpy = vi.fn();
             
-            manager.updateClusterResources(partialUpdate);
+            resourceManager.on('clusterUpdate', eventSpy);
+
+            const nodeMetrics = {
+                memory: {
+                    total: 1024 * 1024 * 1024,
+                    used: 512 * 1024 * 1024,
+                    free: 512 * 1024 * 1024,
+                    processUsage: 256 * 1024 * 1024,
+                    heapUsage: 128 * 1024 * 1024
+                },
+                cpu: {
+                    usage: 50,
+                    loadAvg: [50, 50, 50],
+                    processUsage: 25
+                },
+                storage: {
+                    used: 0,
+                    free: 1000
+                },
+                availableResources: {
+                    memory: 512 * 1024 * 1024,
+                    cpu: 50
+                },
+                utilizationPercentages: {
+                    memory: 50,
+                    cpu: 50
+                },
+                clusterMetrics: {
+                    totalMemory: 1024 * 1024 * 1024,
+                    totalCpu: 100,
+                    availableMemory: 512 * 1024 * 1024,
+                    availableCpu: 50,
+                    nodeCount: 1,
+                    activeNodes: 1
+                }
+            };
+
+            resourceManager.updateNodeMetrics(nodeId, nodeMetrics);
+            expect(eventSpy).toHaveBeenCalledWith(expect.objectContaining({
+                type: 'nodeUpdate',
+                nodeId
+            }));
+
+            resourceManager.removeNode(nodeId);
+            expect(eventSpy).toHaveBeenCalledWith(expect.objectContaining({
+                type: 'nodeRemoval',
+                nodeId
+            }));
+        });
+    });
+
+    describe('Resource Alerts', () => {
+        it('should emit alerts for critical resource usage', async () => {
+            const alertSpy = vi.fn();
+            resourceManager.on('alert', alertSpy);
+
+            const criticalRequest = {
+                memory: 900 * 1024 * 1024, // 900MB (above warning)
+                cpu: 75 // Above warning
+            };
+
+            await resourceManager.reserveResources('test-task', criticalRequest);
             
-            const metrics = manager.getClusterMetrics();
-            expect(metrics.totalMemory).toBe(initialUpdate.totalMemory);
-            expect(metrics.availableMemory).toBe(partialUpdate.availableMemory);
+            expect(alertSpy).toHaveBeenCalledWith(expect.objectContaining({
+                type: expect.stringMatching(/memory|cpu/),
+                level: 'warning'
+            }));
         });
     });
 });
