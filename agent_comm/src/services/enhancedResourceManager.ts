@@ -62,6 +62,7 @@ export class EnhancedResourceManager extends EventEmitter {
     private lastCpuTime: number;
     private readonly totalMemory: number;
     private readonly totalCpu: number;
+    private readonly storage: { used: number; free: number };
 
     constructor(limits: ResourceLimits) {
         super();
@@ -73,6 +74,10 @@ export class EnhancedResourceManager extends EventEmitter {
         this.lastCpuTime = Date.now();
         this.totalMemory = os.totalmem();
         this.totalCpu = 100; // 100% CPU
+        this.storage = {
+            used: 0,
+            free: 1000 // Default storage value
+        };
         
         // Start metrics monitoring
         this.start();
@@ -142,41 +147,54 @@ export class EnhancedResourceManager extends EventEmitter {
         taskId: string,
         request: ResourceRequest
     ): Promise<boolean> {
-        if (await this.canHandleTask(request)) {
-            this.reservedResources.set(taskId, request);
-
-            // Check if this reservation puts us over warning thresholds
-            const totalReservedMemory = Array.from(this.reservedResources.values())
-                .reduce((sum, req) => sum + req.memory, 0);
-            const totalReservedCpu = Array.from(this.reservedResources.values())
-                .reduce((sum, req) => sum + req.cpu, 0);
-
-            const memoryPercentage = (totalReservedMemory / this.totalMemory) * 100;
-            if (memoryPercentage >= this.limits.memory.warning) {
-                this.emit('alert', {
-                    type: 'memory',
-                    level: memoryPercentage >= this.limits.memory.max ? 'critical' : 'warning',
-                    message: `Memory usage at ${memoryPercentage.toFixed(1)}%`,
-                    value: totalReservedMemory,
-                    threshold: this.limits.memory.warning,
-                    timestamp: new Date()
-                });
-            }
-
-            if (totalReservedCpu >= this.limits.cpu.warning) {
-                this.emit('alert', {
-                    type: 'cpu',
-                    level: totalReservedCpu >= this.limits.cpu.maxUsage ? 'critical' : 'warning',
-                    message: `CPU usage at ${totalReservedCpu.toFixed(1)}%`,
-                    value: totalReservedCpu,
-                    threshold: this.limits.cpu.warning,
-                    timestamp: new Date()
-                });
-            }
-
-            return true;
+        // Check if we can handle the task
+        const canHandle = await this.canHandleTask(request);
+        if (!canHandle) {
+            return false;
         }
-        return false;
+
+        // Calculate current utilization before reservation
+        const currentMetrics = await this.getEnhancedMetrics();
+        const currentMemoryUsage = currentMetrics.utilizationPercentages.memory;
+        const currentCpuUsage = currentMetrics.utilizationPercentages.cpu;
+
+        // Calculate new utilization after potential reservation
+        const memoryToReserve = (request.memory / this.totalMemory) * 100;
+        const newMemoryUsage = currentMemoryUsage + memoryToReserve;
+        const newCpuUsage = currentCpuUsage + request.cpu;
+
+        // Check against limits
+        if (newMemoryUsage > this.limits.memory.max || newCpuUsage > this.limits.cpu.maxUsage) {
+            return false;
+        }
+
+        // Reserve the resources
+        this.reservedResources.set(taskId, request);
+
+        // Emit alerts if we're approaching limits
+        if (newMemoryUsage >= this.limits.memory.warning) {
+            this.emit('alert', {
+                type: 'memory',
+                level: newMemoryUsage >= this.limits.memory.max ? 'critical' : 'warning',
+                message: `Memory usage at ${newMemoryUsage.toFixed(1)}%`,
+                value: request.memory,
+                threshold: this.limits.memory.warning,
+                timestamp: new Date()
+            });
+        }
+
+        if (newCpuUsage >= this.limits.cpu.warning) {
+            this.emit('alert', {
+                type: 'cpu',
+                level: newCpuUsage >= this.limits.cpu.maxUsage ? 'critical' : 'warning',
+                message: `CPU usage at ${newCpuUsage.toFixed(1)}%`,
+                value: request.cpu,
+                threshold: this.limits.cpu.warning,
+                timestamp: new Date()
+            });
+        }
+
+        return true;
     }
 
     /**
@@ -253,10 +271,7 @@ export class EnhancedResourceManager extends EventEmitter {
                 loadAvg: os.loadavg(),
                 processUsage: process.cpuUsage().user / 1000000
             },
-            storage: {
-                used: 0, // Implement storage metrics if needed
-                free: 1000
-            },
+            storage: this.storage,
             availableResources: {
                 memory: Math.max(0, freeMemory - totalReservedMemory),
                 cpu: Math.max(0, this.totalCpu - cpuUsage - totalReservedCpu)

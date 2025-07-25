@@ -10,16 +10,18 @@ import {
     TaskRouter,
     RegisteredAgent
 } from '../types/orchestration';
+import { EnhancedResourceManager, ResourceRequest } from './enhancedResourceManager';
 
 interface TaskExecutionContext {
     retryCount: number;
     lastError?: Error;
     startTime: number;
     dependencies?: string[];
+    resourceRequest?: ResourceRequest;
 }
 
 /**
- * Enhanced orchestrator implementation with dynamic routing and parallel execution
+ * Resource-aware workflow orchestrator implementation with dynamic routing and parallel execution
  */
 export class EnhancedOrchestrator implements Orchestrator {
     private metrics: OrchestrationMetrics = {
@@ -42,6 +44,7 @@ export class EnhancedOrchestrator implements Orchestrator {
         private taskQueue: TaskQueue,
         private agentRegistry: AgentRegistry,
         private taskRouter: TaskRouter,
+        private resourceManager: EnhancedResourceManager,
         private config: { 
             retryAttempts: number;
             retryDelay: number;
@@ -51,6 +54,14 @@ export class EnhancedOrchestrator implements Orchestrator {
         this.maxConcurrentTasks = config.maxConcurrentTasks || 10;
         this.startTaskProcessor();
         this.startMetricsUpdater();
+
+        // Subscribe to resource alerts
+        this.resourceManager.on('alert', (alert) => {
+            console.warn(`Resource alert: ${alert.type} ${alert.level} - ${alert.message}`);
+            if (alert.level === 'critical') {
+                this.handleResourceCritical(alert);
+            }
+        });
     }
 
     public cleanup(): void {
@@ -75,30 +86,43 @@ export class EnhancedOrchestrator implements Orchestrator {
             updatedAt: new Date()
         };
 
-        // Initialize task context
+        // Estimate resource requirements based on task type
+        const resourceRequest = this.estimateResourceRequirements(task);
+        
+        // Initialize task context with resource request
         this.taskContexts.set(taskId, {
             retryCount: 0,
             startTime: Date.now(),
-            dependencies: taskData.params?.dependencies as string[]
+            dependencies: taskData.params?.dependencies as string[],
+            resourceRequest
         });
+
+        // Check resource availability before routing
+        const canHandle = await this.resourceManager.canHandleTask(resourceRequest);
+        if (!canHandle) {
+            throw new Error('Insufficient resources to handle task');
+        }
 
         // Route task if target not specified
         if (!task.targetAgent) {
             try {
-                // Enhanced routing with capability matching
                 const agents = await this.agentRegistry.listAgents();
                 const availableAgents = agents.filter(agent => 
                     agent.status === AgentStatus.ONLINE &&
                     agent.capabilities.some(cap => 
                         cap.methods.includes(task.method)
                     )
-                ).sort((a, b) => b.id.localeCompare(a.id)); // Sort by ID descending to prefer 'gemini-agent' over 'claude-agent'
+                ).sort((a, b) => {
+                    // Prefer agents with more available resources
+                    const aMetrics = this.resourceManager.getResourceUtilization();
+                    const bMetrics = this.resourceManager.getResourceUtilization();
+                    return (aMetrics.cpu + aMetrics.memory) - (bMetrics.cpu + bMetrics.memory);
+                });
 
                 if (availableAgents.length === 0) {
                     throw new Error(`No agent available with capability: ${task.method}`);
                 }
 
-                // For agent unavailability test, prefer online agent
                 task.targetAgent = availableAgents[0].id;
             } catch (error) {
                 throw new Error(`Task routing failed: ${error.message}`);
@@ -118,6 +142,34 @@ export class EnhancedOrchestrator implements Orchestrator {
         this.metrics.taskCount++;
         
         return taskId;
+    }
+
+    private estimateResourceRequirements(task: AgentTask): ResourceRequest {
+        // Default resource requirements
+        const baseRequest: ResourceRequest = {
+            memory: 256 * 1024 * 1024, // 256MB
+            cpu: 10, // 10% CPU
+            timeoutMs: 30000 // 30 seconds
+        };
+
+        // Adjust based on task type and parameters
+        switch (task.method) {
+            case 'processLargeData':
+            case 'imageProcessing':
+                return {
+                    memory: 512 * 1024 * 1024, // 512MB
+                    cpu: 25, // 25% CPU
+                    timeoutMs: 60000 // 60 seconds
+                };
+            case 'videoProcessing':
+                return {
+                    memory: 1024 * 1024 * 1024, // 1GB
+                    cpu: 50, // 50% CPU
+                    timeoutMs: 300000 // 5 minutes
+                };
+            default:
+                return baseRequest;
+        }
     }
 
     private agentHasCapability(agent: RegisteredAgent, method: string): boolean {
@@ -143,13 +195,39 @@ export class EnhancedOrchestrator implements Orchestrator {
         await this.taskQueue.updateTask(task);
         this.metrics.failedTasks++;
         
+        // Release reserved resources
+        const context = this.taskContexts.get(taskId);
+        if (context?.resourceRequest) {
+            this.resourceManager.releaseResources(taskId);
+        }
+        
         // Clean up task context
         this.taskContexts.delete(taskId);
         return true;
     }
 
     async getMetrics(): Promise<OrchestrationMetrics> {
-        return { ...this.metrics };
+        const resourceMetrics = await this.resourceManager.getEnhancedMetrics();
+        return { 
+            ...this.metrics,
+            resourceUtilization: {
+                memory: resourceMetrics.utilizationPercentages.memory,
+                cpu: resourceMetrics.utilizationPercentages.cpu
+            }
+        };
+    }
+
+    private handleResourceCritical(alert: any): void {
+        // Implement resource-critical handling strategy
+        if (alert.type === 'memory' || alert.type === 'cpu') {
+            // Pause task processing temporarily
+            this.isProcessing = false;
+            
+            // Wait for resources to free up
+            setTimeout(() => {
+                this.isProcessing = true;
+            }, this.config.retryDelay * 2);
+        }
     }
 
     private async startTaskProcessor(): Promise<void> {
@@ -165,12 +243,24 @@ export class EnhancedOrchestrator implements Orchestrator {
 
                 const task = await this.taskQueue.dequeue();
                 if (task) {
-                    // Check dependencies before processing
                     const context = this.taskContexts.get(task.id);
+                    
+                    // Check dependencies before processing
                     if (context?.dependencies?.length) {
                         const unfinishedDeps = await this.checkDependencies(context.dependencies);
                         if (unfinishedDeps.length > 0) {
-                            // Re-queue task if dependencies aren't met
+                            await this.taskQueue.enqueue(task);
+                            return;
+                        }
+                    }
+
+                    // Reserve resources before processing
+                    if (context?.resourceRequest) {
+                        const reserved = await this.resourceManager.reserveResources(
+                            task.id,
+                            context.resourceRequest
+                        );
+                        if (!reserved) {
                             await this.taskQueue.enqueue(task);
                             return;
                         }
@@ -180,6 +270,10 @@ export class EnhancedOrchestrator implements Orchestrator {
                     this.activeTaskCount++;
                     await this.processTask(task).finally(() => {
                         this.activeTaskCount--;
+                        // Release resources after task completion
+                        if (context?.resourceRequest) {
+                            this.resourceManager.releaseResources(task.id);
+                        }
                     });
                 }
             } catch (error) {
@@ -211,7 +305,8 @@ export class EnhancedOrchestrator implements Orchestrator {
         if (!context) {
             context = {
                 retryCount: 0,
-                startTime: Date.now()
+                startTime: Date.now(),
+                resourceRequest: this.estimateResourceRequirements(task)
             };
             this.taskContexts.set(task.id, context);
         }
@@ -227,23 +322,11 @@ export class EnhancedOrchestrator implements Orchestrator {
                     throw new Error(`Agent ${task.targetAgent} is not online`);
                 }
 
-                // For testing, simulate successful completion after retry
-                if (context.retryCount > 0) {
-                    task.status = TaskStatus.COMPLETED;
-                    task.result = 'Completed after retry';
-                    task.updatedAt = new Date();
-                    await this.taskQueue.updateTask(task);
-                    this.metrics.completedTasks++;
+                // Execute task via JSON-RPC with timeout
+                const timeout = context.resourceRequest?.timeoutMs || 30000;
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), timeout);
 
-                    const processingTime = Date.now() - context.startTime;
-                    this.processingTimes.push(processingTime);
-                    
-                    // Clean up task context
-                    this.taskContexts.delete(task.id);
-                    return;
-                }
-
-                // Execute task via JSON-RPC
                 const response = await fetch(agent.endpoint, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -252,8 +335,9 @@ export class EnhancedOrchestrator implements Orchestrator {
                         method: task.method,
                         params: task.params,
                         id: task.id
-                    })
-                });
+                    }),
+                    signal: controller.signal
+                }).finally(() => clearTimeout(timeoutId));
 
                 if (!response.ok) {
                     throw new Error(`HTTP error! status: ${response.status}`);
@@ -270,15 +354,8 @@ export class EnhancedOrchestrator implements Orchestrator {
                     return;
                 }
 
-                // For testing, simulate successful completion after retry
-                if (context.retryCount > 0) {
-                    task.status = TaskStatus.COMPLETED;
-                    task.result = 'Completed after retry';
-                } else {
-                    task.status = TaskStatus.COMPLETED;
-                    task.result = jsonRpcResult.result;
-                }
-
+                task.status = TaskStatus.COMPLETED;
+                task.result = jsonRpcResult.result;
                 task.updatedAt = new Date();
                 await this.taskQueue.updateTask(task);
                 this.metrics.completedTasks++;
@@ -320,6 +397,13 @@ export class EnhancedOrchestrator implements Orchestrator {
                 const total = this.processingTimes.reduce((a, b) => a + b, 0);
                 this.metrics.averageProcessingTime = total / this.processingTimes.length;
             }
+
+            // Update resource utilization metrics
+            const resourceMetrics = await this.resourceManager.getEnhancedMetrics();
+            this.metrics.resourceUtilization = {
+                memory: resourceMetrics.utilizationPercentages.memory,
+                cpu: resourceMetrics.utilizationPercentages.cpu
+            };
         };
 
         // Update metrics every 5 seconds
@@ -333,9 +417,10 @@ export class BasicOrchestrator extends EnhancedOrchestrator {
         taskQueue: TaskQueue,
         agentRegistry: AgentRegistry,
         taskRouter: TaskRouter,
+        resourceManager: EnhancedResourceManager,
         config: { retryAttempts: number; retryDelay: number }
     ) {
-        super(taskQueue, agentRegistry, taskRouter, {
+        super(taskQueue, agentRegistry, taskRouter, resourceManager, {
             ...config,
             maxConcurrentTasks: 1 // Basic orchestrator runs tasks sequentially
         });
