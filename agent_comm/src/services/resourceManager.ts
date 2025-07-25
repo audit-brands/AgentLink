@@ -2,6 +2,12 @@ import { EventEmitter } from 'events';
 import os from 'os';
 import v8 from 'v8';
 
+export interface AvailableResources {
+    memory: number;      // Available memory in bytes
+    cpu: number;         // Available CPU percentage
+    storage: number;     // Available storage in bytes
+    canAcceptTasks: boolean;  // Whether new tasks can be accepted
+}
 export interface ResourceMetrics {
     memory: {
         total: number;
@@ -90,6 +96,30 @@ export class ResourceManager extends EventEmitter {
         }
     }
 
+    /**
+     * Gets the current available resources for task execution
+     * @returns {AvailableResources} Current available resource metrics
+     */
+    public getAvailableResources(): AvailableResources {
+        const metrics = this.getMetrics();
+        const limits = this.getLimits();
+        
+        // Calculate available resources
+        const availableMemory = metrics.memory.free;
+        const availableCpu = Math.max(0, 100 - metrics.cpu.usage);
+        
+        // Determine if we can accept new tasks based on thresholds
+        const memoryOk = availableMemory > limits.memory.warning;
+        const cpuOk = metrics.cpu.usage < limits.cpu.warning;
+        const canAcceptTasks = memoryOk && cpuOk;
+
+        return {
+            memory: availableMemory,
+            cpu: availableCpu,
+            storage: metrics.storage.free,
+            canAcceptTasks
+        };
+    }
     private initializeMetrics(): ResourceMetrics {
         const totalMem = os.totalmem();
         const freeMem = os.freemem();

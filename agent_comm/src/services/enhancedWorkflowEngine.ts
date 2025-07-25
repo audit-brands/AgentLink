@@ -363,5 +363,115 @@ export class EnhancedWorkflowEngine extends EventEmitter {
         workflowMetrics.set(stepId, metrics);
     }
 
-    // [Previous methods for condition evaluation, error handling, and workflow management remain unchanged]
+    /**
+     * Evaluates workflow conditions
+     */
+    private async evaluateCondition(condition: WorkflowCondition, workflow: WorkflowState): Promise<boolean> {
+        try {
+            return await condition(workflow.variables);
+        } catch (error) {
+            console.error('Condition evaluation failed:', error);
+            return false;
+        }
+    }
+
+    /**
+     * Executes a single workflow step
+     */
+    private async executeStep(step: WorkflowStep, workflow: WorkflowState): Promise<unknown> {
+        // Register rollback handler if provided
+        if (step.rollback) {
+            this.rollbackHandlers.set(step.id, step.rollback);
+        }
+
+        try {
+            this.emit('workflow:step:started', { workflowId: workflow.id, step });
+            return await step.execute(workflow.variables);
+        } catch (error) {
+            throw error;
+        }
+    }
+
+    /**
+     * Handles workflow errors and initiates rollback if needed
+     */
+    private async handleWorkflowError(workflow: WorkflowState, error: unknown): Promise<void> {
+        workflow.status = WorkflowStatus.FAILED;
+        workflow.error = error instanceof Error ? error.message : String(error);
+        workflow.updatedAt = new Date();
+        this.workflows.set(workflow.id, workflow);
+
+        this.emit("workflow:failed", { 
+            workflowId: workflow.id,
+            workflow,
+            error: workflow.error
+        });
+
+        // Initiate rollback if enabled
+        if (workflow.definition.rollbackOnError) {
+            await this.rollbackWorkflow(workflow);
+        }
+    }
+
+    /**
+     * Rolls back workflow steps in reverse order
+     */
+    private async rollbackWorkflow(workflow: WorkflowState): Promise<void> {
+        const originalStatus = workflow.status;
+        workflow.status = WorkflowStatus.ROLLING_BACK;
+        this.emit("workflow:rollback:started", { workflowId: workflow.id });
+
+        // Execute rollback handlers in reverse order
+        for (let i = workflow.steps.length - 1; i >= 0; i--) {
+            const step = workflow.steps[i];
+            const originalStep = workflow.definition.steps.find(s => s.id === step.stepId);
+            
+            if (originalStep?.rollback) {
+                try {
+                    await originalStep.rollback(workflow.variables);
+                    this.emit("workflow:step:rolledback", { 
+                        workflowId: workflow.id,
+                        stepId: step.stepId
+                    });
+                } catch (error) {
+                    console.error(`Rollback failed for step ${step.stepId}:`, error);
+                    this.emit("workflow:rollback:failed", {
+                        workflowId: workflow.id,
+                        stepId: step.stepId,
+                        error: error instanceof Error ? error.message : String(error)
+                    });
+                }
+            }
+        }
+
+        workflow.status = originalStatus === WorkflowStatus.CANCELLED ? 
+            WorkflowStatus.CANCELLED : WorkflowStatus.ROLLED_BACK;
+        workflow.updatedAt = new Date();
+        this.workflows.set(workflow.id, workflow);
+        this.emit("workflow:rollback:completed", { workflowId: workflow.id });
+    }
+
+    /**
+     * Cleanup resources and stop background tasks
+     */
+    public async cleanup(): Promise<void> {
+        // Stop workflow planner
+        clearInterval(this.planningInterval);
+        
+        // Clean up active workflows
+        for (const workflowId of this.activeWorkflows) {
+            const workflow = this.workflows.get(workflowId);
+            if (workflow && workflow.status === WorkflowStatus.RUNNING) {
+                workflow.status = WorkflowStatus.CANCELLED;
+                workflow.updatedAt = new Date();
+                this.workflows.set(workflowId, workflow);
+            }
+        }
+
+        // Clear data structures
+        this.activeWorkflows.clear();
+        this.workflowQueue = [];
+        this.executionMetrics.clear();
+        this.rollbackHandlers.clear();
+    }
 }
