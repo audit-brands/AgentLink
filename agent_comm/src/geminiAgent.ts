@@ -122,6 +122,24 @@ app.get('/.well-known/agent.json', (req: Request, res: Response) => {
     }
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
     console.log(`Gemini agent (Node.js HTTP Server) is running on http://localhost:${PORT}`);
+    const agentCard = {
+        id: "gemini-agent",
+        capabilities: ["RequestRefactor"],
+        endpoint: `http://localhost:${PORT}`
+    };
+    agentRegistry.registerAgent(agentCard);
+
+    // Periodic registration (heartbeat)
+    setInterval(() => {
+        agentRegistry.registerAgent(agentCard);
+    }, 30000); // Register every 30 seconds
+
+    // Graceful shutdown
+    process.on('SIGINT', () => {
+        console.log('Gemini agent shutting down...');
+        agentRegistry.deregisterAgent(agentCard.id);
+        process.exit();
+    });
 });

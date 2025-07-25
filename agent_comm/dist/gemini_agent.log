@@ -1,0 +1,73 @@
+Gemini agent (Node.js HTTP Server) is running on http://localhost:5001
+[DEBUG] Received request: {"jsonrpc":"2.0","method":"RequestRefactor","params":{"code_path":"src/utils/math.js","instruction":"echo this back from Claude"},"id":1}
+ New refactor task received for Gemini!
+[DEBUG] Code path: src/utils/math.js, Instruction: echo this back from Claude
+[EXEC] Running Gemini CLI command: /home/jamieontiveros/Development/github/AgentLink/agent_comm/gemini-cli "echo this back from Claude"
+[EXEC] Gemini CLI stdout: Gemini CLI output for: echo this back from Claude
+[EXEC] Raw stdout length: 50, Trimmed stdout length: 49
+[DEBUG] Output before responseData assignment: Gemini CLI output for: echo this back from Claude
+[DEBUG] Sent response: {"jsonrpc":"2.0","result":"Gemini CLI output for: echo this back from Claude","id":1}
+[DEBUG] Received request: {"jsonrpc":"2.0","method":"RequestRefactor","params":{"code_path":"src/utils/math.js","instruction":"echo this back from Claude"},"id":1}
+ New refactor task received for Gemini!
+[DEBUG] Code path: src/utils/math.js, Instruction: echo this back from Claude
+[EXEC] Running Gemini CLI command: /home/jamieontiveros/Development/github/AgentLink/agent_comm/gemini-cli "echo this back from Claude"
+[EXEC] Gemini CLI stdout: Gemini CLI output for: echo this back from Claude
+[EXEC] Raw stdout length: 50, Trimmed stdout length: 49
+[DEBUG] Output before responseData assignment: Gemini CLI output for: echo this back from Claude
+[DEBUG] Sent response: {"jsonrpc":"2.0","result":"Gemini CLI output for: echo this back from Claude","id":1}
+[DEBUG] Received request: {"jsonrpc":"2.0","method":"RequestRefactor","params":{"code_path":"src/utils/math.js","instruction":"echo this back from Claude"},"id":1}
+ New refactor task received for Gemini!
+[DEBUG] Code path: src/utils/math.js, Instruction: echo this back from Claude
+[EXEC] Running Gemini CLI command: /home/jamieontiveros/Development/github/AgentLink/agent_comm/gemini-cli "echo this back from Claude"
+[EXEC] Gemini CLI stdout: Gemini CLI output for: echo this back from Claude
+[EXEC] Raw stdout length: 50, Trimmed stdout length: 49
+[DEBUG] Output before responseData assignment: Gemini CLI output for: echo this back from Claude
+[DEBUG] Sent response: {"jsonrpc":"2.0","result":"Gemini CLI output for: echo this back from Claude","id":1}
+[DEBUG] Received request: {"jsonrpc":"2.0","method":"RequestRefactor","params":{"code_path":"src/utils/math.js","instruction":"echo this back from Claude"},"id":1}
+ New refactor task received for Gemini!
+[DEBUG] Code path: src/utils/math.js, Instruction: echo this back from Claude
+[EXEC] Running Gemini CLI command: /home/jamieontiveros/Development/github/AgentLink/agent_comm/gemini-cli "echo this back from Claude"
+[EXEC] Gemini CLI stdout: Gemini CLI output for: echo this back from Claude
+[EXEC] Raw stdout length: 50, Trimmed stdout length: 49
+[DEBUG] Output before responseData assignment: Gemini CLI output for: echo this back from Claude
+[DEBUG] Sent response: {"jsonrpc":"2.0","result":"Gemini CLI output for: echo this back from Claude","id":1}
+[DEBUG] Received request: {"jsonrpc":"2.0","method":"RequestRefactor","params":{"code_path":"src/utils/math.js","instruction":"echo this back from Claude with an error"},"id":1}
+ New refactor task received for Gemini!
+[DEBUG] Code path: src/utils/math.js, Instruction: echo this back from Claude with an error
+[EXEC] Running Gemini CLI command: /home/jamieontiveros/Development/github/AgentLink/agent_comm/gemini-cli "echo this back from Claude with an error"
+[EXEC] Gemini CLI stdout: Gemini CLI output for: echo this back from Claude with an error
+[EXEC] Raw stdout length: 64, Trimmed stdout length: 63
+[DEBUG] Output before responseData assignment: Gemini CLI output for: echo this back from Claude with an error
+[DEBUG] Sent response: {"jsonrpc":"2.0","result":"Gemini CLI output for: echo this back from Claude with an error","id":1}
+[DEBUG] Received request: {"jsonrpc":"2.0","method":"RequestRefactor","params":{"code_path":"src/utils/math.js","instruction":"echo this back from Claude"},"id":1}
+ New refactor task received for Gemini!
+[DEBUG] Code path: src/utils/math.js, Instruction: echo this back from Claude
+[EXEC] Running Gemini CLI command: /home/jamieontiveros/Development/github/AgentLink/agent_comm/gemini-cli "echo this back from Claude"
+[EXEC] Gemini CLI stdout: Gemini CLI output for: echo this back from Claude
+[EXEC] Raw stdout length: 50, Trimmed stdout length: 49
+[DEBUG] Output before responseData assignment: Gemini CLI output for: echo this back from Claude
+[DEBUG] Sent response: {"jsonrpc":"2.0","result":"Gemini CLI output for: echo this back from Claude","id":1}
+[DEBUG] Received request: {"jsonrpc":"2.0","method":"RequestRefactor","params":{"code_path":"src/utils/math.js","instruction":"echo this back from Claude"},"id":1}
+ New refactor task received for Gemini!
+[DEBUG] Code path: src/utils/math.js, Instruction: echo this back from Claude
+[EXEC] Running Gemini CLI command: /home/jamieontiveros/Development/github/AgentLink/agent_comm/gemini-cli "echo this back from Claude"
+[EXEC] Gemini CLI stdout: Gemini CLI output for: echo this back from Claude
+[EXEC] Raw stdout length: 50, Trimmed stdout length: 49
+[DEBUG] Output before responseData assignment: Gemini CLI output for: echo this back from Claude
+[DEBUG] Sent response: {"jsonrpc":"2.0","result":"Gemini CLI output for: echo this back from Claude","id":1}
+[DEBUG] Received request: {"jsonrpc":"2.0","method":"RequestRefactor","params":{"code_path":"src/utils/math.js","instruction":"echo this back from Claude with an error"},"id":1}
+ New refactor task received for Gemini!
+[DEBUG] Code path: src/utils/math.js, Instruction: echo this back from Claude with an error
+[EXEC] Running Gemini CLI command: /home/jamieontiveros/Development/github/AgentLink/agent_comm/gemini-cli "echo this back from Claude with an error"
+[EXEC] Gemini CLI stdout: Gemini CLI output for: echo this back from Claude with an error
+[EXEC] Raw stdout length: 64, Trimmed stdout length: 63
+[DEBUG] Output before responseData assignment: Gemini CLI output for: echo this back from Claude with an error
+[DEBUG] Sent response: {"jsonrpc":"2.0","result":"Gemini CLI output for: echo this back from Claude with an error","id":1}
+[DEBUG] Received request: {"jsonrpc":"2.0","method":"RequestRefactor","params":{"code_path":"src/utils/math.js","instruction":"echo this back from Claude"},"id":1}
+ New refactor task received for Gemini!
+[DEBUG] Code path: src/utils/math.js, Instruction: echo this back from Claude
+[EXEC] Running Gemini CLI command: /home/jamieontiveros/Development/github/AgentLink/agent_comm/gemini-cli "echo this back from Claude"
+[EXEC] Gemini CLI stdout: Gemini CLI output for: echo this back from Claude
+[EXEC] Raw stdout length: 50, Trimmed stdout length: 49
+[DEBUG] Output before responseData assignment: Gemini CLI output for: echo this back from Claude
+[DEBUG] Sent response: {"jsonrpc":"2.0","result":"Gemini CLI output for: echo this back from Claude","id":1}

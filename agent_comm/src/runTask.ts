@@ -17,10 +17,22 @@ interface JsonRpcResponse {
 }
 
 async function runTask() {
-    await agentRegistry.discoverAgents();
+    let claudeAgent: any;
+    let geminiAgent: any;
 
-    const claudeAgent = agentRegistry.getAgent('claude-agent');
-    const geminiAgent = agentRegistry.getAgent('gemini-agent');
+    // Poll for agents until both are discovered
+    while (!claudeAgent || !geminiAgent) {
+        claudeAgent = agentRegistry.getAgent('claude-agent');
+        geminiAgent = agentRegistry.getAgent('gemini-agent');
+        if (!claudeAgent || !geminiAgent) {
+            console.log("Waiting for agents to register...");
+            console.log(`Claude Agent: ${claudeAgent ? 'Discovered' : 'Not Discovered'}`);
+            console.log(`Gemini Agent: ${geminiAgent ? 'Discovered' : 'Not Discovered'}`);
+            await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for 1 second
+        }
+    }
+
+    console.log("Agents discovered!");
 
     if (!claudeAgent || !geminiAgent) {
         console.error("Could not discover all agents. Make sure they are running.");
