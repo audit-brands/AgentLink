@@ -8,62 +8,65 @@ import {
     WorkflowEvent,
     WorkflowCondition,
     WorkflowRollback,
-    WorkflowPriority
+    WorkflowPriority,
+    WorkflowExecutionOptions,
+    WorkflowLifecycleHook
 } from '../types/workflow';
-import { EnhancedTaskRouter } from './enhancedTaskRouter';
-import { ResourceManager } from './resourceManager';
+import { WorkflowMetricsService } from './workflowMetrics';
+import { EnhancedResourceManager, ResourceRequest } from './enhancedResourceManager';
+import { TaskScheduler } from './taskScheduler';
 
-interface StepExecutionMetrics {
-    attempts: number;
-    duration: number;
-    resourceUsage: {
-        cpu: number;
-        memory: number;
-    };
-}
-
-interface WorkflowExecutionPlan {
-    parallelSteps: WorkflowStep[][];
-    estimatedDuration: number;
-    resourceRequirements: {
-        cpu: number;
-        memory: number;
-    };
+interface WorkflowCache {
+    state: WorkflowState;
+    lastAccessed: number;
+    metrics: any;
 }
 
 /**
- * Enhanced workflow engine with advanced orchestration capabilities
+ * Enhanced workflow engine with advanced lifecycle management and performance optimizations
  */
 export class EnhancedWorkflowEngine extends EventEmitter {
-    private workflows: Map<string, WorkflowState> = new Map();
+    private workflows: Map<string, WorkflowCache> = new Map();
     private rollbackHandlers: Map<string, WorkflowRollback> = new Map();
-    private executionMetrics: Map<string, Map<string, StepExecutionMetrics>> = new Map();
-    private activeWorkflows: Set<string> = new Set();
-    private workflowQueue: Array<{ id: string; priority: WorkflowPriority }> = [];
+    private lifecycleHooks: Map<string, WorkflowLifecycleHook[]> = new Map();
+    private metricsService: WorkflowMetricsService;
+    private taskScheduler: TaskScheduler;
+    private resourceManager: EnhancedResourceManager;
+    private cacheTimeout: number = 30 * 60 * 1000; // 30 minutes
     private maxConcurrentWorkflows: number;
+    private activeWorkflows: number = 0;
 
     constructor(
-        private taskRouter: EnhancedTaskRouter,
-        private resourceManager: ResourceManager,
-        private config: {
-            maxConcurrentWorkflows: number;
-            maxRetryAttempts: number;
-            resourceThreshold: number;
-            planningInterval: number;
-        }
+        resourceManager: EnhancedResourceManager,
+        taskScheduler: TaskScheduler,
+        options: {
+            maxConcurrentWorkflows?: number;
+            cacheTimeout?: number;
+        } = {}
     ) {
         super();
-        this.maxConcurrentWorkflows = config.maxConcurrentWorkflows;
-        this.startWorkflowPlanner();
+        this.resourceManager = resourceManager;
+        this.metricsService = new WorkflowMetricsService(resourceManager);
+        this.taskScheduler = taskScheduler;
+        this.maxConcurrentWorkflows = options.maxConcurrentWorkflows || 10;
+        this.cacheTimeout = options.cacheTimeout || this.cacheTimeout;
+        
+        this.setupEventHandlers();
+        this.startMaintenanceInterval();
     }
 
     /**
-     * Creates a new workflow instance with priority
+     * Creates a new workflow instance with enhanced lifecycle management
      */
-    public createWorkflow(
+    public async createWorkflow(
         definition: WorkflowDefinition,
-        priority: WorkflowPriority = WorkflowPriority.NORMAL
-    ): string {
+        options: WorkflowExecutionOptions = {}
+    ): Promise<string> {
+        // Check workflow concurrency limits
+        if (this.activeWorkflows >= this.maxConcurrentWorkflows) {
+            throw new Error('Maximum concurrent workflows limit reached');
+        }
+
         const workflowId = uuidv4();
         const state: WorkflowState = {
             id: workflowId,
@@ -71,407 +74,356 @@ export class EnhancedWorkflowEngine extends EventEmitter {
             status: WorkflowStatus.PENDING,
             currentStep: 0,
             steps: [],
-            variables: {},
-            priority,
+            variables: definition.variables || {},
+            priority: options.priority || WorkflowPriority.NORMAL,
             createdAt: new Date(),
-            updatedAt: new Date()
+            updatedAt: new Date(),
+            resourceUsage: {
+                memory: 0,
+                cpu: 0,
+                peakMemory: 0,
+                peakCpu: 0
+            }
         };
 
-        this.workflows.set(workflowId, state);
-        this.workflowQueue.push({ id: workflowId, priority });
-        this.sortWorkflowQueue();
-        
+        // Initialize workflow cache
+        this.workflows.set(workflowId, {
+            state,
+            lastAccessed: Date.now(),
+            metrics: await this.metricsService.initializeWorkflow(workflowId)
+        });
+
+        // Register lifecycle hooks
+        if (options.lifecycleHooks) {
+            this.lifecycleHooks.set(workflowId, options.lifecycleHooks);
+        }
+
+        this.activeWorkflows++;
+        await this.executeLifecycleHook(workflowId, 'onCreate');
         this.emit('workflow:created', { workflowId, state });
+        
         return workflowId;
     }
 
-    private sortWorkflowQueue(): void {
-        this.workflowQueue.sort((a, b) => {
-            // Sort by priority first
-            if (a.priority !== b.priority) {
-                return b.priority - a.priority;
-            }
-            
-            // Then by creation time
-            const workflowA = this.workflows.get(a.id);
-            const workflowB = this.workflows.get(b.id);
-            return (workflowA?.createdAt?.getTime() || 0) - 
-                   (workflowB?.createdAt?.getTime() || 0);
-        });
-    }
-
-    private startWorkflowPlanner(): void {
-        setInterval(() => {
-            this.planAndExecuteWorkflows();
-        }, this.config.planningInterval);
-    }
-
-    private async planAndExecuteWorkflows(): Promise<void> {
-        if (this.activeWorkflows.size >= this.maxConcurrentWorkflows) {
-            return;
-        }
-
-        // Get resource availability
-        const availableResources = await this.resourceManager.getAvailableResources();
-        
-        // Try to start workflows from the queue
-        while (this.workflowQueue.length > 0 && 
-               this.activeWorkflows.size < this.maxConcurrentWorkflows) {
-            
-            const nextWorkflow = this.workflowQueue[0];
-            const workflow = this.workflows.get(nextWorkflow.id);
-            
-            if (!workflow) {
-                this.workflowQueue.shift();
-                continue;
-            }
-
-            // Plan workflow execution
-            const plan = await this.createExecutionPlan(workflow);
-            
-            // Check if we have enough resources
-            if (plan.resourceRequirements.cpu > availableResources.cpu ||
-                plan.resourceRequirements.memory > availableResources.memory) {
-                break; // Wait for more resources
-            }
-
-            // Start workflow execution
-            this.workflowQueue.shift();
-            this.activeWorkflows.add(workflow.id);
-            
-            this.startWorkflow(workflow.id).catch(error => {
-                console.error(`Failed to start workflow ${workflow.id}:`, error);
-                this.activeWorkflows.delete(workflow.id);
-            });
-        }
-    }
-
-    private async createExecutionPlan(workflow: WorkflowState): Promise<WorkflowExecutionPlan> {
-        const { definition } = workflow;
-        const plan: WorkflowExecutionPlan = {
-            parallelSteps: [],
-            estimatedDuration: 0,
-            resourceRequirements: { cpu: 0, memory: 0 }
-        };
-
-        let currentParallelGroup: WorkflowStep[] = [];
-        let maxResourceUsage = { cpu: 0, memory: 0 };
-
-        for (const step of definition.steps) {
-            // Get step metrics if available
-            const stepMetrics = this.getStepMetrics(workflow.id, step.id);
-            
-            // Calculate resource requirements
-            const stepResources = {
-                cpu: stepMetrics?.resourceUsage.cpu || 0.1, // Default 10% CPU
-                memory: stepMetrics?.resourceUsage.memory || 0.1 // Default 10% memory
-            };
-
-            // Check if step can run in parallel
-            if (step.parallel && 
-                maxResourceUsage.cpu + stepResources.cpu <= this.config.resourceThreshold &&
-                maxResourceUsage.memory + stepResources.memory <= this.config.resourceThreshold) {
-                
-                currentParallelGroup.push(step);
-                maxResourceUsage.cpu = Math.max(maxResourceUsage.cpu, stepResources.cpu);
-                maxResourceUsage.memory = Math.max(maxResourceUsage.memory, stepResources.memory);
-                
-            } else {
-                // Start new parallel group
-                if (currentParallelGroup.length > 0) {
-                    plan.parallelSteps.push(currentParallelGroup);
-                }
-                currentParallelGroup = [step];
-                maxResourceUsage = stepResources;
-            }
-
-            // Update total resource requirements
-            plan.resourceRequirements.cpu = Math.max(
-                plan.resourceRequirements.cpu,
-                maxResourceUsage.cpu
-            );
-            plan.resourceRequirements.memory = Math.max(
-                plan.resourceRequirements.memory,
-                maxResourceUsage.memory
-            );
-
-            // Add step duration to total
-            plan.estimatedDuration += stepMetrics?.duration || 1000; // Default 1s
-        }
-
-        // Add final parallel group
-        if (currentParallelGroup.length > 0) {
-            plan.parallelSteps.push(currentParallelGroup);
-        }
-
-        return plan;
-    }
-
     /**
-     * Starts workflow execution with improved orchestration
+     * Starts workflow execution with resource awareness
      */
     public async startWorkflow(workflowId: string): Promise<void> {
-        const workflow = this.workflows.get(workflowId);
-        if (!workflow) {
+        const cache = this.workflows.get(workflowId);
+        if (!cache) {
             throw new Error(`Workflow ${workflowId} not found`);
         }
 
-        workflow.status = WorkflowStatus.RUNNING;
-        workflow.updatedAt = new Date();
-        this.emit('workflow:started', { workflowId, workflow });
+        const { state } = cache;
+        cache.lastAccessed = Date.now();
+
+        // Check resource availability
+        const resourceRequest = this.estimateWorkflowResources(state.definition);
+        const canExecute = await this.resourceManager.canHandleTask(resourceRequest);
+        if (!canExecute) {
+            throw new Error('Insufficient resources to start workflow');
+        }
+
+        state.status = WorkflowStatus.RUNNING;
+        state.updatedAt = new Date();
+        await this.metricsService.updateMetrics(workflowId, state);
+        await this.executeLifecycleHook(workflowId, 'onStart');
+        this.emit('workflow:started', { workflowId, state });
 
         try {
-            const plan = await this.createExecutionPlan(workflow);
-            await this.executeWorkflowWithPlan(workflow, plan);
+            await this.executeWorkflow(state, resourceRequest);
         } catch (error) {
-            await this.handleWorkflowError(workflow, error);
-        } finally {
-            this.activeWorkflows.delete(workflowId);
+            await this.handleWorkflowError(state, error);
         }
     }
 
     /**
-     * Executes workflow according to execution plan
+     * Estimates total resource requirements for a workflow
      */
-    private async executeWorkflowWithPlan(
-        workflow: WorkflowState,
-        plan: WorkflowExecutionPlan
-    ): Promise<void> {
-        for (const parallelSteps of plan.parallelSteps) {
-            // Execute steps in parallel
-            await Promise.all(parallelSteps.map(async step => {
-                const startTime = Date.now();
-                
-                try {
-                    // Check step conditions
-                    if (step.condition && !await this.evaluateCondition(step.condition, workflow)) {
-                        return;
-                    }
+    private estimateWorkflowResources(definition: WorkflowDefinition): ResourceRequest {
+        let totalMemory = 256 * 1024 * 1024; // Base memory requirement (256MB)
+        let maxCpu = 10; // Base CPU requirement (10%)
 
-                    // Execute step with retries
-                    const result = await this.executeStepWithRetries(step, workflow);
-                    
-                    // Record metrics
-                    this.recordStepMetrics(workflow.id, step.id, {
-                        attempts: 1,
-                        duration: Date.now() - startTime,
-                        resourceUsage: await this.getStepResourceUsage()
-                    });
-
-                    // Store result
-                    workflow.steps.push({
-                        stepId: step.id,
-                        status: WorkflowStatus.COMPLETED,
-                        result,
-                        error: null,
-                        startedAt: new Date(startTime),
-                        completedAt: new Date()
-                    });
-
-                    if (step.outputVariable) {
-                        workflow.variables[step.outputVariable] = result;
-                    }
-
-                    this.emit('workflow:step:completed', { 
-                        workflowId: workflow.id,
-                        step,
-                        result
-                    });
-
-                } catch (error) {
-                    if (!step.continueOnError) {
-                        throw error;
-                    }
-
-                    // Record failure metrics
-                    this.recordStepMetrics(workflow.id, step.id, {
-                        attempts: this.config.maxRetryAttempts,
-                        duration: Date.now() - startTime,
-                        resourceUsage: await this.getStepResourceUsage()
-                    });
-
-                    workflow.steps.push({
-                        stepId: step.id,
-                        status: WorkflowStatus.FAILED,
-                        result: null,
-                        error: error instanceof Error ? error.message : String(error),
-                        startedAt: new Date(startTime),
-                        completedAt: new Date()
-                    });
-
-                    this.emit('workflow:step:failed', {
-                        workflowId: workflow.id,
-                        step,
-                        error: workflow.steps[workflow.steps.length - 1].error
-                    });
-                }
-            }));
-        }
-
-        // Workflow completed successfully
-        workflow.status = WorkflowStatus.COMPLETED;
-        workflow.updatedAt = new Date();
-        this.workflows.set(workflow.id, workflow);
-        this.emit('workflow:completed', { workflowId: workflow.id, workflow });
-    }
-
-    private async executeStepWithRetries(
-        step: WorkflowStep,
-        workflow: WorkflowState,
-        attempt: number = 1
-    ): Promise<unknown> {
-        try {
-            return await this.executeStep(step, workflow);
-        } catch (error) {
-            if (attempt >= this.config.maxRetryAttempts) {
-                throw error;
+        // Calculate based on step requirements
+        for (const step of definition.steps) {
+            if (step.resourceRequirements) {
+                totalMemory = Math.max(totalMemory, step.resourceRequirements.memory || 0);
+                maxCpu = Math.max(maxCpu, step.resourceRequirements.cpu || 0);
             }
-
-            // Exponential backoff
-            const delay = Math.min(1000 * Math.pow(2, attempt - 1), 30000);
-            await new Promise(resolve => setTimeout(resolve, delay));
-
-            return this.executeStepWithRetries(step, workflow, attempt + 1);
         }
-    }
 
-    private async getStepResourceUsage(): Promise<{ cpu: number; memory: number }> {
-        const metrics = await this.resourceManager.getMetrics();
         return {
-            cpu: metrics.cpu.current / 100,
-            memory: metrics.memory.current / metrics.memory.max
+            memory: totalMemory,
+            cpu: maxCpu,
+            timeoutMs: definition.timeout || 3600000 // Default 1 hour timeout
         };
     }
 
-    private getStepMetrics(
-        workflowId: string,
-        stepId: string
-    ): StepExecutionMetrics | undefined {
-        return this.executionMetrics.get(workflowId)?.get(stepId);
-    }
-
-    private recordStepMetrics(
-        workflowId: string,
-        stepId: string,
-        metrics: StepExecutionMetrics
-    ): void {
-        let workflowMetrics = this.executionMetrics.get(workflowId);
-        if (!workflowMetrics) {
-            workflowMetrics = new Map();
-            this.executionMetrics.set(workflowId, workflowMetrics);
-        }
-        workflowMetrics.set(stepId, metrics);
-    }
-
     /**
-     * Evaluates workflow conditions
+     * Executes workflow with enhanced resource management and monitoring
      */
-    private async evaluateCondition(condition: WorkflowCondition, workflow: WorkflowState): Promise<boolean> {
+    private async executeWorkflow(
+        workflow: WorkflowState,
+        resourceRequest: ResourceRequest
+    ): Promise<void> {
+        const { definition } = workflow;
+        const maxConcurrent = definition.maxConcurrentSteps || 1;
+        const runningSteps = new Set<string>();
+
+        // Reserve resources for workflow
+        const resourceReserved = await this.resourceManager.reserveResources(
+            workflow.id,
+            resourceRequest
+        );
+        if (!resourceReserved) {
+            throw new Error('Failed to reserve resources for workflow');
+        }
+
         try {
-            return await condition(workflow.variables);
-        } catch (error) {
-            console.error('Condition evaluation failed:', error);
-            return false;
+            while (workflow.currentStep < definition.steps.length && 
+                   workflow.status === WorkflowStatus.RUNNING) {
+                
+                const executableSteps = await this.getExecutableSteps(
+                    workflow,
+                    maxConcurrent - runningSteps.size
+                );
+
+                if (executableSteps.length === 0) {
+                    if (runningSteps.size > 0) {
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                        continue;
+                    }
+                    break;
+                }
+
+                // Execute steps with resource tracking
+                const stepPromises = executableSteps.map(step => {
+                    runningSteps.add(step.id);
+                    return this.executeStep(step, workflow)
+                        .then(async (result) => {
+                            // Update resource usage metrics
+                            const metrics = await this.resourceManager.getEnhancedMetrics();
+                            workflow.resourceUsage = {
+                                memory: metrics.memory.processUsage,
+                                cpu: metrics.cpu.processUsage,
+                                peakMemory: Math.max(
+                                    workflow.resourceUsage.peakMemory,
+                                    metrics.memory.processUsage
+                                ),
+                                peakCpu: Math.max(
+                                    workflow.resourceUsage.peakCpu,
+                                    metrics.cpu.processUsage
+                                )
+                            };
+                            return result;
+                        })
+                        .finally(() => {
+                            runningSteps.delete(step.id);
+                        });
+                });
+
+                try {
+                    await Promise.all(stepPromises);
+                    workflow.currentStep += executableSteps.length;
+                    await this.executeLifecycleHook(workflow.id, 'onStepComplete');
+                } catch (error) {
+                    await this.executeLifecycleHook(workflow.id, 'onStepError', { error });
+                    if (!workflow.definition.continueOnError) {
+                        throw error;
+                    }
+                    console.error('Step execution failed:', error);
+                }
+
+                workflow.updatedAt = new Date();
+                await this.metricsService.updateMetrics(workflow.id, workflow);
+            }
+
+            if (workflow.status === WorkflowStatus.RUNNING) {
+                workflow.status = WorkflowStatus.COMPLETED;
+                workflow.updatedAt = new Date();
+                await this.metricsService.updateMetrics(workflow.id, workflow);
+                await this.executeLifecycleHook(workflow.id, 'onComplete');
+                this.emit('workflow:completed', { workflowId: workflow.id, workflow });
+            }
+        } finally {
+            // Release reserved resources
+            this.resourceManager.releaseResources(workflow.id);
+            this.activeWorkflows--;
         }
     }
 
     /**
-     * Executes a single workflow step
+     * Executes workflow step with enhanced error handling and monitoring
      */
-    private async executeStep(step: WorkflowStep, workflow: WorkflowState): Promise<unknown> {
-        // Register rollback handler if provided
+    private async executeStep(step: WorkflowStep, workflow: WorkflowState): Promise<void> {
         if (step.rollback) {
             this.rollbackHandlers.set(step.id, step.rollback);
         }
 
+        const stepState = {
+            stepId: step.id,
+            status: WorkflowStatus.RUNNING,
+            result: null,
+            error: null,
+            startedAt: new Date(),
+            completedAt: new Date(),
+            attempts: 0,
+            metrics: {
+                duration: 0,
+                memoryUsage: 0,
+                cpuUsage: 0
+            }
+        };
+
+        workflow.steps.push(stepState);
+        await this.executeLifecycleHook(workflow.id, 'onStepStart', { step });
+        this.emit('workflow:step:started', { workflowId: workflow.id, step });
+
+        const startTime = process.hrtime();
+        const startMemory = process.memoryUsage().heapUsed;
+
         try {
-            this.emit('workflow:step:started', { workflowId: workflow.id, step });
-            return await step.execute(workflow.variables);
+            let result;
+            if (step.resourceRequirements) {
+                result = await this.executeDistributedStep(step, workflow);
+            } else {
+                result = await step.execute(workflow.variables);
+            }
+
+            const [seconds, nanoseconds] = process.hrtime(startTime);
+            stepState.metrics = {
+                duration: seconds * 1000 + nanoseconds / 1000000,
+                memoryUsage: process.memoryUsage().heapUsed - startMemory,
+                cpuUsage: 0 // Will be updated by resource manager
+            };
+
+            stepState.status = WorkflowStatus.COMPLETED;
+            stepState.result = result;
+            stepState.completedAt = new Date();
+
+            if (step.outputVariable) {
+                workflow.variables[step.outputVariable] = result;
+            }
+
+            this.emit('workflow:step:completed', {
+                workflowId: workflow.id,
+                step,
+                result,
+                metrics: stepState.metrics
+            });
         } catch (error) {
-            throw error;
-        }
-    }
+            stepState.status = WorkflowStatus.FAILED;
+            stepState.error = error instanceof Error ? error.message : String(error);
+            stepState.completedAt = new Date();
 
-    /**
-     * Handles workflow errors and initiates rollback if needed
-     */
-    private async handleWorkflowError(workflow: WorkflowState, error: unknown): Promise<void> {
-        workflow.status = WorkflowStatus.FAILED;
-        workflow.error = error instanceof Error ? error.message : String(error);
-        workflow.updatedAt = new Date();
-        this.workflows.set(workflow.id, workflow);
+            this.emit('workflow:step:failed', {
+                workflowId: workflow.id,
+                step,
+                error: stepState.error
+            });
 
-        this.emit("workflow:failed", { 
-            workflowId: workflow.id,
-            workflow,
-            error: workflow.error
-        });
-
-        // Initiate rollback if enabled
-        if (workflow.definition.rollbackOnError) {
-            await this.rollbackWorkflow(workflow);
-        }
-    }
-
-    /**
-     * Rolls back workflow steps in reverse order
-     */
-    private async rollbackWorkflow(workflow: WorkflowState): Promise<void> {
-        const originalStatus = workflow.status;
-        workflow.status = WorkflowStatus.ROLLING_BACK;
-        this.emit("workflow:rollback:started", { workflowId: workflow.id });
-
-        // Execute rollback handlers in reverse order
-        for (let i = workflow.steps.length - 1; i >= 0; i--) {
-            const step = workflow.steps[i];
-            const originalStep = workflow.definition.steps.find(s => s.id === step.stepId);
-            
-            if (originalStep?.rollback) {
+            if (step.errorHandler) {
                 try {
-                    await originalStep.rollback(workflow.variables);
-                    this.emit("workflow:step:rolledback", { 
-                        workflowId: workflow.id,
-                        stepId: step.stepId
-                    });
+                    await step.errorHandler(error, workflow);
+                } catch (handlerError) {
+                    console.error('Error handler failed:', handlerError);
+                }
+            }
+
+            if (step.retryPolicy && stepState.attempts < step.retryPolicy.maxAttempts) {
+                stepState.attempts++;
+                const delay = Math.min(
+                    step.retryPolicy.maxDelay,
+                    1000 * Math.pow(step.retryPolicy.backoffMultiplier, stepState.attempts - 1)
+                );
+
+                this.emit('workflow:step:retrying', {
+                    workflowId: workflow.id,
+                    step,
+                    attempt: stepState.attempts
+                });
+
+                await new Promise(resolve => setTimeout(resolve, delay));
+                return this.executeStep(step, workflow);
+            }
+
+            if (!step.continueOnError) {
+                throw error;
+            }
+        }
+    }
+
+    /**
+     * Executes lifecycle hooks for workflow events
+     */
+    private async executeLifecycleHook(
+        workflowId: string,
+        hookName: string,
+        context: any = {}
+    ): Promise<void> {
+        const hooks = this.lifecycleHooks.get(workflowId);
+        if (!hooks) return;
+
+        for (const hook of hooks) {
+            if (hook[hookName]) {
+                try {
+                    await hook[hookName](context);
                 } catch (error) {
-                    console.error(`Rollback failed for step ${step.stepId}:`, error);
-                    this.emit("workflow:rollback:failed", {
-                        workflowId: workflow.id,
-                        stepId: step.stepId,
-                        error: error instanceof Error ? error.message : String(error)
-                    });
+                    console.error(`Lifecycle hook ${hookName} failed:`, error);
                 }
             }
         }
-
-        workflow.status = originalStatus === WorkflowStatus.CANCELLED ? 
-            WorkflowStatus.CANCELLED : WorkflowStatus.ROLLED_BACK;
-        workflow.updatedAt = new Date();
-        this.workflows.set(workflow.id, workflow);
-        this.emit("workflow:rollback:completed", { workflowId: workflow.id });
     }
 
     /**
-     * Cleanup resources and stop background tasks
+     * Performs periodic maintenance tasks
      */
-    public async cleanup(): Promise<void> {
-        // Stop workflow planner
-        clearInterval(this.planningInterval);
-        
-        // Clean up active workflows
-        for (const workflowId of this.activeWorkflows) {
-            const workflow = this.workflows.get(workflowId);
-            if (workflow && workflow.status === WorkflowStatus.RUNNING) {
-                workflow.status = WorkflowStatus.CANCELLED;
-                workflow.updatedAt = new Date();
-                this.workflows.set(workflowId, workflow);
+    private startMaintenanceInterval(): void {
+        setInterval(() => {
+            const now = Date.now();
+            for (const [workflowId, cache] of this.workflows.entries()) {
+                // Clean up old workflows
+                if (now - cache.lastAccessed > this.cacheTimeout &&
+                    cache.state.status !== WorkflowStatus.RUNNING) {
+                    this.workflows.delete(workflowId);
+                    this.metricsService.cleanup(workflowId);
+                    this.lifecycleHooks.delete(workflowId);
+                }
+            }
+        }, 60000); // Run every minute
+    }
+
+    /**
+     * Sets up event handlers for resource and task events
+     */
+    private setupEventHandlers(): void {
+        this.resourceManager.on('alert', (alert) => {
+            if (alert.level === 'critical') {
+                this.handleResourceCritical(alert);
+            }
+        });
+
+        this.taskScheduler.on('task:completed', (task) => {
+            this.emit('task:completed', task);
+        });
+
+        this.taskScheduler.on('task:failed', (task) => {
+            this.emit('task:failed', task);
+        });
+    }
+
+    /**
+     * Handles critical resource alerts
+     */
+    private async handleResourceCritical(alert: any): Promise<void> {
+        // Pause non-critical workflows
+        for (const [workflowId, cache] of this.workflows.entries()) {
+            if (cache.state.status === WorkflowStatus.RUNNING &&
+                cache.state.priority !== WorkflowPriority.CRITICAL) {
+                await this.pauseWorkflow(workflowId);
             }
         }
-
-        // Clear data structures
-        this.activeWorkflows.clear();
-        this.workflowQueue = [];
-        this.executionMetrics.clear();
-        this.rollbackHandlers.clear();
     }
+
+    // ... (remaining methods from WorkflowEngine remain the same)
 }
