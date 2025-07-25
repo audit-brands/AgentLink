@@ -1,6 +1,34 @@
-import { ResourceManager, ResourceMetrics as BaseResourceMetrics, ResourceLimits, ResourceAlert } from './resourceManager';
+import { EventEmitter } from 'events';
+import os from 'os';
 
-export interface ResourceMetrics extends BaseResourceMetrics {
+export interface ResourceLimits {
+    memory: {
+        max: number;
+        warning: number;
+    };
+    cpu: {
+        maxUsage: number;
+        warning: number;
+    };
+}
+
+export interface ResourceMetrics {
+    memory: {
+        total: number;
+        used: number;
+        free: number;
+        processUsage: number;
+        heapUsage: number;
+    };
+    cpu: {
+        usage: number;
+        loadAvg: number[];
+        processUsage: number;
+    };
+    storage: {
+        used: number;
+        free: number;
+    };
     availableResources: {
         memory: number;
         cpu: number;
@@ -9,194 +37,321 @@ export interface ResourceMetrics extends BaseResourceMetrics {
         memory: number;
         cpu: number;
     };
-    clusterMetrics?: ClusterResources;
+    clusterMetrics: {
+        totalMemory: number;
+        totalCpu: number;
+        availableMemory: number;
+        availableCpu: number;
+        nodeCount: number;
+        activeNodes: number;
+    };
 }
 
-export interface ClusterResources {
-    totalMemory: number;
-    totalCpu: number;
-    availableMemory: number;
-    availableCpu: number;
-    nodeCount: number;
-    activeNodes: number;
-}
-
-export interface ResourceAllocationRequest {
+export interface ResourceRequest {
     memory: number;
     cpu: number;
-    priority?: number;
     timeoutMs?: number;
 }
 
-export class EnhancedResourceManager extends ResourceManager {
-    private clusterResources: ClusterResources;
-    private resourceReservations: Map<string, ResourceAllocationRequest>;
-    private readonly defaultReservationTimeout = 30000; // 30 seconds
+export class EnhancedResourceManager extends EventEmitter {
+    private readonly limits: ResourceLimits;
+    private reservedResources: Map<string, ResourceRequest>;
+    private metricsInterval: NodeJS.Timer | null;
+    private clusterNodes: Map<string, ResourceMetrics>;
+    private lastCpuUsage: { user: number; system: number } | null;
+    private lastCpuTime: number;
 
     constructor(limits: ResourceLimits) {
-        super(limits);
-        this.clusterResources = {
-            totalMemory: 0,
-            totalCpu: 0,
-            availableMemory: 0,
-            availableCpu: 0,
-            nodeCount: 0,
-            activeNodes: 0
-        };
-        this.resourceReservations = new Map();
-
-        // Cleanup expired reservations periodically
-        setInterval(() => this.cleanupExpiredReservations(), 10000);
-    }
-
-    public async getEnhancedMetrics(): Promise<ResourceMetrics> {
-        const baseMetrics = this.getMetrics();
-        const limits = this.getLimits();
-
-        // Calculate available resources considering reservations
-        const totalReservedMemory = Array.from(this.resourceReservations.values())
-            .reduce((total, res) => total + res.memory, 0);
-        const totalReservedCpu = Array.from(this.resourceReservations.values())
-            .reduce((total, res) => total + res.cpu, 0);
-
-        const availableMemory = limits.memory.max - baseMetrics.memory.processUsage - totalReservedMemory;
-        const availableCPU = limits.cpu.maxUsage - baseMetrics.cpu.usage - totalReservedCpu;
-
-        return {
-            ...baseMetrics,
-            availableResources: {
-                memory: Math.max(0, availableMemory),
-                cpu: Math.max(0, availableCPU)
-            },
-            utilizationPercentages: {
-                memory: (baseMetrics.memory.processUsage / limits.memory.max) * 100,
-                cpu: (baseMetrics.cpu.usage / limits.cpu.maxUsage) * 100
-            },
-            clusterMetrics: this.clusterResources
-        };
-    }
-
-    public async canHandleTask(requiredResources: ResourceAllocationRequest): Promise<boolean> {
-        const metrics = await this.getEnhancedMetrics();
+        super();
+        this.limits = limits;
+        this.reservedResources = new Map();
+        this.clusterNodes = new Map();
+        this.metricsInterval = null;
+        this.lastCpuUsage = null;
+        this.lastCpuTime = Date.now();
         
-        // Check both local and cluster-wide resources
-        const localAvailable = 
-            metrics.availableResources.memory >= requiredResources.memory &&
-            metrics.availableResources.cpu >= requiredResources.cpu;
-
-        const clusterAvailable = 
-            metrics.clusterMetrics &&
-            metrics.clusterMetrics.availableMemory >= requiredResources.memory &&
-            metrics.clusterMetrics.availableCpu >= requiredResources.cpu;
-
-        return localAvailable || (clusterAvailable || false);
-    }
-
-    public getResourceUtilization(): { memory: number; cpu: number } {
-        const metrics = this.getMetrics();
-        const limits = this.getLimits();
-
-        return {
-            memory: (metrics.memory.processUsage / limits.memory.max) * 100,
-            cpu: (metrics.cpu.usage / limits.cpu.maxUsage) * 100
-        };
+        // Start metrics monitoring
+        this.start();
     }
 
     /**
-     * Updates cluster-wide resource information
+     * Start resource monitoring
      */
-    public updateClusterResources(resources: Partial<ClusterResources>): void {
-        this.clusterResources = {
-            ...this.clusterResources,
-            ...resources
-        };
-        this.emit('cluster:resources:updated', this.clusterResources);
+    public start(): void {
+        if (!this.metricsInterval) {
+            this.metricsInterval = setInterval(() => this.updateMetrics(), 1000);
+        }
     }
 
     /**
-     * Reserves resources for a task
+     * Stop resource monitoring
+     */
+    public stop(): void {
+        if (this.metricsInterval) {
+            clearInterval(this.metricsInterval);
+            this.metricsInterval = null;
+        }
+    }
+
+    /**
+     * Get current resource metrics
+     */
+    public async getEnhancedMetrics(): Promise<ResourceMetrics> {
+        const metrics = await this.collectLocalMetrics();
+        const clusterMetrics = this.aggregateClusterMetrics();
+        
+        return {
+            ...metrics,
+            clusterMetrics
+        };
+    }
+
+    /**
+     * Check if a task can be handled with current resources
+     */
+    public async canHandleTask(request: ResourceRequest): Promise<boolean> {
+        const metrics = await this.getEnhancedMetrics();
+        const { availableResources } = metrics;
+
+        return (
+            availableResources.memory >= request.memory &&
+            availableResources.cpu >= request.cpu
+        );
+    }
+
+    /**
+     * Reserve resources for a task
      */
     public async reserveResources(
         taskId: string,
-        requirements: ResourceAllocationRequest
+        request: ResourceRequest
     ): Promise<boolean> {
-        if (!await this.canHandleTask(requirements)) {
-            return false;
+        if (await this.canHandleTask(request)) {
+            this.reservedResources.set(taskId, request);
+            return true;
         }
-
-        const timeout = requirements.timeoutMs || this.defaultReservationTimeout;
-        this.resourceReservations.set(taskId, requirements);
-
-        // Set timeout to automatically release reservation
-        setTimeout(() => {
-            this.releaseResources(taskId);
-        }, timeout);
-
-        this.emit('resources:reserved', {
-            taskId,
-            requirements
-        });
-
-        return true;
+        return false;
     }
 
     /**
-     * Releases reserved resources
+     * Release reserved resources
      */
     public releaseResources(taskId: string): void {
-        const reservation = this.resourceReservations.get(taskId);
-        if (reservation) {
-            this.resourceReservations.delete(taskId);
-            this.emit('resources:released', {
-                taskId,
-                resources: reservation
-            });
-        }
+        this.reservedResources.delete(taskId);
     }
 
     /**
-     * Gets current cluster metrics
+     * Get current resource utilization
      */
-    public getClusterMetrics(): ClusterResources {
-        return this.clusterResources;
-    }
-
-    /**
-     * Handles resource alerts from other nodes
-     */
-    public handleRemoteAlert(nodeId: string, alert: ResourceAlert): void {
-        this.emit('remote:alert', {
-            nodeId,
-            alert
-        });
-
-        if (alert.level === 'critical') {
-            this.updateClusterResources({
-                activeNodes: Math.max(0, this.clusterResources.activeNodes - 1)
-            });
-        }
-    }
-
-    private cleanupExpiredReservations(): void {
-        for (const [taskId] of this.resourceReservations.entries()) {
-            this.releaseResources(taskId);
-        }
-    }
-
-    protected override checkResources(): void {
-        super.checkResources();
+    public getResourceUtilization(): { memory: number; cpu: number } {
+        const totalReservedMemory = Array.from(this.reservedResources.values())
+            .reduce((sum, req) => sum + req.memory, 0);
         
-        // Add cluster-aware resource checks
-        const metrics = this.getMetrics();
-        const totalReservedMemory = Array.from(this.resourceReservations.values())
-            .reduce((total, res) => total + res.memory, 0);
-        const totalReservedCpu = Array.from(this.resourceReservations.values())
-            .reduce((total, res) => total + res.cpu, 0);
+        const totalReservedCpu = Array.from(this.reservedResources.values())
+            .reduce((sum, req) => sum + req.cpu, 0);
 
-        // Update cluster resources with local information
-        this.updateClusterResources({
-            availableMemory: metrics.memory.free - totalReservedMemory,
-            availableCpu: 100 - metrics.cpu.usage - totalReservedCpu
+        return {
+            memory: (totalReservedMemory / this.limits.memory.max) * 100,
+            cpu: totalReservedCpu
+        };
+    }
+
+    /**
+     * Update node metrics in cluster
+     */
+    public updateNodeMetrics(nodeId: string, metrics: ResourceMetrics): void {
+        this.clusterNodes.set(nodeId, metrics);
+        this.emit('clusterUpdate', {
+            type: 'nodeUpdate',
+            nodeId,
+            metrics,
+            timestamp: new Date()
+        });
+    }
+
+    /**
+     * Remove node from cluster
+     */
+    public removeNode(nodeId: string): void {
+        this.clusterNodes.delete(nodeId);
+        this.emit('clusterUpdate', {
+            type: 'nodeRemoval',
+            nodeId,
+            timestamp: new Date()
+        });
+    }
+
+    private async collectLocalMetrics(): Promise<ResourceMetrics> {
+        const totalMemory = os.totalmem();
+        const freeMemory = os.freemem();
+        const usedMemory = totalMemory - freeMemory;
+        const cpuUsage = await this.getCpuUsage();
+        const processMemory = process.memoryUsage();
+
+        // Calculate available resources considering reservations
+        const totalReservedMemory = Array.from(this.reservedResources.values())
+            .reduce((sum, req) => sum + req.memory, 0);
+        const totalReservedCpu = Array.from(this.reservedResources.values())
+            .reduce((sum, req) => sum + req.cpu, 0);
+
+        const metrics: ResourceMetrics = {
+            memory: {
+                total: totalMemory,
+                used: usedMemory,
+                free: freeMemory,
+                processUsage: processMemory.rss,
+                heapUsage: processMemory.heapUsed
+            },
+            cpu: {
+                usage: cpuUsage,
+                loadAvg: os.loadavg(),
+                processUsage: process.cpuUsage().user / 1000000
+            },
+            storage: {
+                used: 0, // Implement storage metrics if needed
+                free: 1000
+            },
+            availableResources: {
+                memory: Math.max(0, freeMemory - totalReservedMemory),
+                cpu: Math.max(0, 100 - cpuUsage - totalReservedCpu)
+            },
+            utilizationPercentages: {
+                memory: (usedMemory / totalMemory) * 100,
+                cpu: cpuUsage
+            },
+            clusterMetrics: this.aggregateClusterMetrics()
+        };
+
+        // Check for resource alerts
+        this.checkResourceAlerts(metrics);
+
+        return metrics;
+    }
+
+    private async getCpuUsage(): Promise<number> {
+        const cpus = os.cpus();
+        const currentCpuUsage = process.cpuUsage();
+        const currentTime = Date.now();
+
+        if (!this.lastCpuUsage) {
+            this.lastCpuUsage = currentCpuUsage;
+            this.lastCpuTime = currentTime;
+            return 0;
+        }
+
+        const userDiff = currentCpuUsage.user - this.lastCpuUsage.user;
+        const systemDiff = currentCpuUsage.system - this.lastCpuUsage.system;
+        const timeDiff = currentTime - this.lastCpuTime;
+
+        this.lastCpuUsage = currentCpuUsage;
+        this.lastCpuTime = currentTime;
+
+        const totalCpu = cpus.reduce((acc, cpu) => {
+            const total = Object.values(cpu.times).reduce((sum, time) => sum + time, 0);
+            return acc + (cpu.times.user + cpu.times.nice + cpu.times.sys) / total * 100;
+        }, 0);
+        
+        // Combine process-specific and system-wide metrics
+        const processCpuUsage = (userDiff + systemDiff) / (timeDiff * 1000) * 100;
+        return Math.min(100, (totalCpu / cpus.length + processCpuUsage) / 2);
+    }
+
+    private aggregateClusterMetrics(): ResourceMetrics['clusterMetrics'] {
+        let totalMemory = 0;
+        let totalCpu = 0;
+        let availableMemory = 0;
+        let availableCpu = 0;
+        let activeNodes = 0;
+
+        // Include local node in calculations
+        const localMetrics = {
+            memory: {
+                total: os.totalmem(),
+                free: os.freemem()
+            },
+            cpu: {
+                usage: 0 // Will be updated with actual usage
+            }
+        };
+
+        // Add local node metrics
+        totalMemory += localMetrics.memory.total;
+        totalCpu += 100; // Local node has 100% CPU
+        availableMemory += localMetrics.memory.free;
+        availableCpu += (100 - localMetrics.cpu.usage);
+        activeNodes += 1;
+
+        // Add remote node metrics
+        for (const metrics of this.clusterNodes.values()) {
+            totalMemory += metrics.memory.total;
+            totalCpu += 100; // Each node has 100% CPU
+            availableMemory += metrics.availableResources.memory;
+            availableCpu += metrics.availableResources.cpu;
+            if (metrics.cpu.usage < this.limits.cpu.maxUsage) {
+                activeNodes++;
+            }
+        }
+
+        return {
+            totalMemory,
+            totalCpu,
+            availableMemory,
+            availableCpu,
+            nodeCount: this.clusterNodes.size + 1, // Include local node
+            activeNodes
+        };
+    }
+
+    private checkResourceAlerts(metrics: ResourceMetrics): void {
+        // Memory alerts
+        if (metrics.utilizationPercentages.memory >= this.limits.memory.max) {
+            this.emit('alert', {
+                type: 'memory',
+                level: 'critical',
+                message: 'Memory usage exceeded maximum limit',
+                value: metrics.memory.used,
+                threshold: this.limits.memory.max,
+                timestamp: new Date()
+            });
+        } else if (metrics.utilizationPercentages.memory >= this.limits.memory.warning) {
+            this.emit('alert', {
+                type: 'memory',
+                level: 'warning',
+                message: 'Memory usage approaching maximum limit',
+                value: metrics.memory.used,
+                threshold: this.limits.memory.warning,
+                timestamp: new Date()
+            });
+        }
+
+        // CPU alerts
+        if (metrics.cpu.usage >= this.limits.cpu.maxUsage) {
+            this.emit('alert', {
+                type: 'cpu',
+                level: 'critical',
+                message: 'CPU usage exceeded maximum limit',
+                value: metrics.cpu.usage,
+                threshold: this.limits.cpu.maxUsage,
+                timestamp: new Date()
+            });
+        } else if (metrics.cpu.usage >= this.limits.cpu.warning) {
+            this.emit('alert', {
+                type: 'cpu',
+                level: 'warning',
+                message: 'CPU usage approaching maximum limit',
+                value: metrics.cpu.usage,
+                threshold: this.limits.cpu.warning,
+                timestamp: new Date()
+            });
+        }
+    }
+
+    private async updateMetrics(): Promise<void> {
+        const metrics = await this.collectLocalMetrics();
+        this.emit('metrics', {
+            type: 'update',
+            metrics,
+            timestamp: new Date()
         });
     }
 }
