@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
-import { ResourceManager } from './resourceManager';
+import { EnhancedResourceManager } from './enhancedResourceManager';
+import { AgentCommunicationService } from './agentCommunication';
 
 export interface WorkflowTask {
     id: string;
@@ -14,6 +15,12 @@ export interface WorkflowTask {
     started?: Date;
     completed?: Date;
     error?: Error;
+    distributionPreference?: 'local' | 'remote' | 'any';
+    resourceRequirements: {
+        memory: number;
+        cpu: number;
+        timeoutMs?: number;
+    };
 }
 
 export interface TaskSchedulerConfig {
@@ -21,20 +28,27 @@ export interface TaskSchedulerConfig {
     defaultMaxRetries: number;
     retryDelayMs: number;
     taskTimeoutMs: number;
+    resourceReservationTimeout?: number;
 }
 
 export class TaskScheduler extends EventEmitter {
     private tasks: Map<string, WorkflowTask>;
     private runningTasks: Set<string>;
     private readonly config: TaskSchedulerConfig;
-    private readonly resourceManager: ResourceManager;
+    private readonly resourceManager: EnhancedResourceManager;
+    private readonly agentCommunication: AgentCommunicationService;
     private schedulerInterval: NodeJS.Timer;
     private isProcessing: boolean;
 
-    constructor(config: TaskSchedulerConfig, resourceManager: ResourceManager) {
+    constructor(
+        config: TaskSchedulerConfig,
+        resourceManager: EnhancedResourceManager,
+        agentCommunication: AgentCommunicationService
+    ) {
         super();
         this.config = config;
         this.resourceManager = resourceManager;
+        this.agentCommunication = agentCommunication;
         this.tasks = new Map();
         this.runningTasks = new Set();
         this.isProcessing = false;
@@ -52,6 +66,9 @@ export class TaskScheduler extends EventEmitter {
                 this.handleResourceCritical(alert.type);
             }
         });
+
+        // Listen for agent communication events
+        this.setupAgentListeners();
     }
 
     /**
@@ -62,7 +79,11 @@ export class TaskScheduler extends EventEmitter {
             ...task,
             status: 'pending',
             retryCount: 0,
-            created: new Date()
+            created: new Date(),
+            resourceRequirements: {
+                ...task.resourceRequirements,
+                timeoutMs: task.resourceRequirements.timeoutMs || this.config.resourceReservationTimeout
+            }
         };
 
         this.tasks.set(newTask.id, newTask);
@@ -80,7 +101,7 @@ export class TaskScheduler extends EventEmitter {
     /**
      * Cancel a pending or running task
      */
-    public cancelTask(taskId: string): boolean {
+    public async cancelTask(taskId: string): Promise<boolean> {
         const task = this.tasks.get(taskId);
         if (!task || task.status === 'completed') {
             return false;
@@ -88,6 +109,23 @@ export class TaskScheduler extends EventEmitter {
 
         if (task.status === 'running') {
             this.runningTasks.delete(taskId);
+            // Release reserved resources
+            this.resourceManager.releaseResources(taskId);
+            
+            // If task is running on a remote agent, notify it
+            if (task.agentId !== 'local') {
+                await this.agentCommunication.sendMessage({
+                    id: `cancel_${taskId}`,
+                    type: 'request',
+                    source: 'scheduler',
+                    target: task.agentId,
+                    payload: {
+                        action: 'cancel',
+                        taskId
+                    },
+                    timestamp: new Date()
+                });
+            }
         }
 
         task.status = 'failed';
@@ -123,8 +161,9 @@ export class TaskScheduler extends EventEmitter {
                     break;
                 }
 
-                if (await this.canRunTask(task)) {
-                    await this.startTask(task);
+                const executionStrategy = await this.determineExecutionStrategy(task);
+                if (executionStrategy) {
+                    await this.executeTask(task, executionStrategy);
                 }
             }
         } finally {
@@ -148,20 +187,66 @@ export class TaskScheduler extends EventEmitter {
         return true;
     }
 
-    private async canRunTask(task: WorkflowTask): Promise<boolean> {
-        // Check resource availability
-        if (!this.resourceManager.canAllocateMemory(task.estimatedMemory)) {
-            return false;
+    private async determineExecutionStrategy(task: WorkflowTask): Promise<'local' | 'remote' | undefined> {
+        // Check if task can be executed locally
+        const localExecution = await this.resourceManager.canHandleTask({
+            memory: task.resourceRequirements.memory,
+            cpu: task.resourceRequirements.cpu,
+            timeoutMs: task.resourceRequirements.timeoutMs
+        });
+
+        if (task.distributionPreference === 'local' && localExecution) {
+            return 'local';
         }
 
-        return true;
+        // Check for remote execution if allowed
+        if (task.distributionPreference !== 'local') {
+            const availableAgent = this.agentCommunication.findBestNodeForTask(task);
+            if (availableAgent) {
+                return 'remote';
+            }
+        }
+
+        // If no preference and local execution is possible, use local
+        if (task.distributionPreference === 'any' && localExecution) {
+            return 'local';
+        }
+
+        return undefined;
     }
 
-    private async startTask(task: WorkflowTask): Promise<void> {
+    private async executeTask(task: WorkflowTask, strategy: 'local' | 'remote'): Promise<void> {
+        // Reserve resources before execution
+        const resourceReserved = await this.resourceManager.reserveResources(
+            task.id,
+            {
+                memory: task.resourceRequirements.memory,
+                cpu: task.resourceRequirements.cpu,
+                timeoutMs: task.resourceRequirements.timeoutMs
+            }
+        );
+
+        if (!resourceReserved) {
+            return;
+        }
+
         task.status = 'running';
         task.started = new Date();
         this.runningTasks.add(task.id);
-        this.emit('task:started', task);
+
+        try {
+            if (strategy === 'local') {
+                await this.executeLocalTask(task);
+            } else {
+                await this.executeRemoteTask(task);
+            }
+        } catch (error) {
+            await this.handleTaskError(task, error as Error);
+        }
+    }
+
+    private async executeLocalTask(task: WorkflowTask): Promise<void> {
+        this.emit('task:started', { ...task, executionType: 'local' });
 
         try {
             // Set timeout for task execution
@@ -169,43 +254,40 @@ export class TaskScheduler extends EventEmitter {
                 setTimeout(() => reject(new Error('Task timeout')), this.config.taskTimeoutMs);
             });
 
-            // Execute task (this will be replaced with actual agent execution)
-            const executionPromise = this.executeTask(task);
+            // Execute task (placeholder for actual execution)
+            const executionPromise = new Promise(resolve => setTimeout(resolve, 500));
 
             await Promise.race([executionPromise, timeoutPromise]);
             
-            if (task.status === 'running') {
-                task.status = 'completed';
-                task.completed = new Date();
-                this.runningTasks.delete(task.id);
-                this.emit('task:completed', task);
-            }
+            task.status = 'completed';
+            task.completed = new Date();
+            this.runningTasks.delete(task.id);
+            this.resourceManager.releaseResources(task.id);
+            this.emit('task:completed', task);
         } catch (error) {
-            if (task.status === 'running') {
-                await this.handleTaskError(task, error as Error);
-            }
+            throw error;
         }
     }
 
-    private async executeTask(task: WorkflowTask): Promise<void> {
-        // This is a placeholder for actual agent execution
-        // Will be implemented with agent communication
-        await new Promise(resolve => setTimeout(resolve, 500));
-        
-        // Simulate failures for testing
-        if (task.id.includes('failing')) {
-            throw new Error('Task execution failed');
+    private async executeRemoteTask(task: WorkflowTask): Promise<void> {
+        const targetAgent = this.agentCommunication.findBestNodeForTask(task);
+        if (!targetAgent) {
+            throw new Error('No suitable agent found for remote execution');
         }
-        
-        // Simulate timeouts for testing
-        if (task.id.includes('timeout')) {
-            await new Promise(resolve => setTimeout(resolve, this.config.taskTimeoutMs + 1000));
+
+        task.agentId = targetAgent.id;
+        this.emit('task:started', { ...task, executionType: 'remote' });
+
+        const success = await this.agentCommunication.assignTask(task, targetAgent.id);
+        if (!success) {
+            throw new Error('Failed to assign task to remote agent');
         }
     }
 
     private async handleTaskError(task: WorkflowTask, error: Error): Promise<void> {
         task.error = error;
         this.runningTasks.delete(task.id);
+        this.resourceManager.releaseResources(task.id);
 
         if (task.retryCount < (task.maxRetries ?? this.config.defaultMaxRetries)) {
             task.retryCount++;
@@ -222,21 +304,29 @@ export class TaskScheduler extends EventEmitter {
     }
 
     private handleResourceCritical(resourceType: string): void {
-        // Pause new task scheduling and cancel running tasks
-        if (resourceType === 'memory') {
-            // Cancel all running tasks
-            for (const taskId of this.runningTasks) {
-                const task = this.tasks.get(taskId);
-                if (task && task.status === 'running') {
-                    task.status = 'failed';
-                    task.error = new Error('Resource critical: task cancelled');
+        // Cancel tasks and release resources
+        for (const taskId of this.runningTasks) {
+            const task = this.tasks.get(taskId);
+            if (task && task.status === 'running') {
+                this.cancelTask(taskId).catch(console.error);
+            }
+        }
+    }
+
+    private setupAgentListeners(): void {
+        this.agentCommunication.on('task:status:updated', (message) => {
+            const task = this.tasks.get(message.taskId);
+            if (task) {
+                if (message.payload.status === 'completed') {
+                    task.status = 'completed';
                     task.completed = new Date();
-                    this.emit('task:cancelled', task);
+                    this.runningTasks.delete(task.id);
+                    this.resourceManager.releaseResources(task.id);
+                    this.emit('task:completed', task);
+                } else if (message.payload.status === 'failed') {
+                    this.handleTaskError(task, new Error(message.payload.error)).catch(console.error);
                 }
             }
-            
-            // Reset running tasks set
-            this.runningTasks.clear();
-        }
+        });
     }
 }

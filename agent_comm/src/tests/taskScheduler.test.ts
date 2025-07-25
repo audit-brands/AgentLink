@@ -1,10 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { TaskScheduler, TaskSchedulerConfig } from '../services/taskScheduler';
-import { ResourceManager, ResourceLimits } from '../services/resourceManager';
+import { EnhancedResourceManager } from '../services/enhancedResourceManager';
+import { AgentCommunicationService } from '../services/agentCommunication';
+import { ResourceLimits } from '../services/resourceManager';
 
 describe('TaskScheduler', () => {
     let taskScheduler: TaskScheduler;
-    let resourceManager: ResourceManager;
+    let resourceManager: EnhancedResourceManager;
+    let agentCommunication: AgentCommunicationService;
 
     const resourceLimits: ResourceLimits = {
         memory: {
@@ -21,12 +24,14 @@ describe('TaskScheduler', () => {
         maxConcurrentTasks: 3,
         defaultMaxRetries: 3,
         retryDelayMs: 1000,
-        taskTimeoutMs: 5000
+        taskTimeoutMs: 5000,
+        resourceReservationTimeout: 10000
     };
 
     beforeEach(() => {
-        resourceManager = new ResourceManager(resourceLimits);
-        taskScheduler = new TaskScheduler(schedulerConfig, resourceManager);
+        resourceManager = new EnhancedResourceManager(resourceLimits);
+        agentCommunication = new AgentCommunicationService(resourceManager);
+        taskScheduler = new TaskScheduler(schedulerConfig, resourceManager, agentCommunication);
     });
 
     afterEach(() => {
@@ -41,7 +46,11 @@ describe('TaskScheduler', () => {
                 agentId: 'agent-1',
                 priority: 1,
                 estimatedMemory: 1024 * 1024,
-                maxRetries: 3
+                maxRetries: 3,
+                resourceRequirements: {
+                    memory: 1024 * 1024,
+                    cpu: 10
+                }
             });
 
             const task = taskScheduler.getTaskStatus(taskId);
@@ -59,7 +68,11 @@ describe('TaskScheduler', () => {
                     agentId: 'agent-1',
                     priority: priorities[i],
                     estimatedMemory: 1024 * 1024,
-                    maxRetries: 3
+                    maxRetries: 3,
+                    resourceRequirements: {
+                        memory: 1024 * 1024,
+                        cpu: 10
+                    }
                 }));
             }
 
@@ -78,7 +91,11 @@ describe('TaskScheduler', () => {
                     agentId: 'agent-1',
                     priority: 1,
                     estimatedMemory: 1024 * 1024,
-                    maxRetries: 3
+                    maxRetries: 3,
+                    resourceRequirements: {
+                        memory: 1024 * 1024,
+                        cpu: 10
+                    }
                 }));
             }
 
@@ -100,7 +117,11 @@ describe('TaskScheduler', () => {
                 agentId: 'agent-1',
                 priority: 1,
                 estimatedMemory: 9 * 1024 * 1024 * 1024, // 9GB
-                maxRetries: 3
+                maxRetries: 3,
+                resourceRequirements: {
+                    memory: 9 * 1024 * 1024 * 1024,
+                    cpu: 10
+                }
             });
 
             // Wait for task processing attempt
@@ -116,7 +137,11 @@ describe('TaskScheduler', () => {
                 agentId: 'agent-1',
                 priority: 1,
                 estimatedMemory: 1024 * 1024,
-                maxRetries: 3
+                maxRetries: 3,
+                resourceRequirements: {
+                    memory: 1024 * 1024,
+                    cpu: 10
+                }
             });
 
             // Wait for task to start
@@ -138,6 +163,146 @@ describe('TaskScheduler', () => {
             const task = taskScheduler.getTaskStatus(taskId);
             expect(task?.status).not.toBe('running');
         });
+
+        it('should release resources after task completion', async () => {
+            const taskId = taskScheduler.addTask({
+                id: 'resource-test',
+                agentId: 'local',
+                priority: 1,
+                estimatedMemory: 1024 * 1024,
+                maxRetries: 3,
+                resourceRequirements: {
+                    memory: 1024 * 1024,
+                    cpu: 10
+                }
+            });
+
+            // Wait for task execution
+            await new Promise(resolve => setTimeout(resolve, 200));
+
+            const reservations = (resourceManager as any).resourceReservations;
+            expect(reservations.has(taskId)).toBe(false);
+        });
+    });
+
+    describe('Distributed Task Execution', () => {
+        it('should execute task locally when preferred', async () => {
+            const taskId = taskScheduler.addTask({
+                id: 'local-task',
+                agentId: 'local',
+                priority: 1,
+                estimatedMemory: 1024 * 1024,
+                maxRetries: 3,
+                distributionPreference: 'local',
+                resourceRequirements: {
+                    memory: 1024 * 1024,
+                    cpu: 10
+                }
+            });
+
+            // Wait for task execution
+            await new Promise(resolve => setTimeout(resolve, 200));
+
+            const task = taskScheduler.getTaskStatus(taskId);
+            expect(task?.status).toBe('completed');
+            expect(task?.agentId).toBe('local');
+        });
+
+        it('should distribute task to remote agent when appropriate', async () => {
+            const mockAgent = {
+                id: 'remote-1',
+                capabilities: {
+                    resourceCapacity: {
+                        memory: 16 * 1024 * 1024 * 1024,
+                        cpu: 100
+                    }
+                }
+            };
+
+            vi.spyOn(agentCommunication, 'findBestNodeForTask').mockReturnValue(mockAgent);
+            vi.spyOn(agentCommunication, 'assignTask').mockResolvedValue(true);
+
+            const taskId = taskScheduler.addTask({
+                id: 'remote-task',
+                agentId: 'pending',
+                priority: 1,
+                estimatedMemory: 10 * 1024 * 1024 * 1024, // Exceeds local capacity
+                maxRetries: 3,
+                distributionPreference: 'any',
+                resourceRequirements: {
+                    memory: 10 * 1024 * 1024 * 1024,
+                    cpu: 90
+                }
+            });
+
+            // Wait for task assignment
+            await new Promise(resolve => setTimeout(resolve, 200));
+
+            const task = taskScheduler.getTaskStatus(taskId);
+            expect(task?.agentId).toBe('remote-1');
+            expect(agentCommunication.assignTask).toHaveBeenCalled();
+        });
+
+        it('should handle remote task completion', async () => {
+            const taskId = taskScheduler.addTask({
+                id: 'remote-completion',
+                agentId: 'remote-1',
+                priority: 1,
+                estimatedMemory: 1024 * 1024,
+                maxRetries: 3,
+                distributionPreference: 'remote',
+                resourceRequirements: {
+                    memory: 1024 * 1024,
+                    cpu: 10
+                }
+            });
+
+            // Simulate remote task completion
+            agentCommunication.emit('task:status:updated', {
+                taskId,
+                payload: {
+                    status: 'completed',
+                    result: { success: true }
+                }
+            });
+
+            // Wait for event processing
+            await new Promise(resolve => setTimeout(resolve, 100));
+
+            const task = taskScheduler.getTaskStatus(taskId);
+            expect(task?.status).toBe('completed');
+        });
+
+        it('should handle remote task failure and retry', async () => {
+            const taskId = taskScheduler.addTask({
+                id: 'remote-failure',
+                agentId: 'remote-1',
+                priority: 1,
+                estimatedMemory: 1024 * 1024,
+                maxRetries: 3,
+                distributionPreference: 'remote',
+                resourceRequirements: {
+                    memory: 1024 * 1024,
+                    cpu: 10
+                }
+            });
+
+            // Simulate remote task failure
+            agentCommunication.emit('task:status:updated', {
+                taskId,
+                payload: {
+                    status: 'failed',
+                    error: 'Task execution failed'
+                }
+            });
+
+            // Wait for retry
+            await new Promise(resolve => setTimeout(resolve, schedulerConfig.retryDelayMs + 100));
+
+            const task = taskScheduler.getTaskStatus(taskId);
+            expect(task?.retryCount).toBe(1);
+            expect(task?.status).toBe('pending');
+        });
     });
 
     describe('Error Handling', () => {
@@ -150,7 +315,11 @@ describe('TaskScheduler', () => {
                 agentId: 'agent-1',
                 priority: 1,
                 estimatedMemory: 1024 * 1024,
-                maxRetries: 2
+                maxRetries: 2,
+                resourceRequirements: {
+                    memory: 1024 * 1024,
+                    cpu: 10
+                }
             });
 
             // Wait for retry attempts
@@ -170,7 +339,11 @@ describe('TaskScheduler', () => {
                 agentId: 'agent-1',
                 priority: 1,
                 estimatedMemory: 1024 * 1024,
-                maxRetries: 0
+                maxRetries: 0,
+                resourceRequirements: {
+                    memory: 1024 * 1024,
+                    cpu: 10
+                }
             });
 
             // Wait for task timeout
@@ -190,7 +363,11 @@ describe('TaskScheduler', () => {
                 agentId: 'agent-1',
                 priority: 1,
                 estimatedMemory: 1024 * 1024,
-                maxRetries: 3
+                maxRetries: 3,
+                resourceRequirements: {
+                    memory: 1024 * 1024,
+                    cpu: 10
+                }
             });
 
             const task2Id = taskScheduler.addTask({
@@ -199,7 +376,11 @@ describe('TaskScheduler', () => {
                 priority: 2,
                 estimatedMemory: 1024 * 1024,
                 dependencies: [task1Id],
-                maxRetries: 3
+                maxRetries: 3,
+                resourceRequirements: {
+                    memory: 1024 * 1024,
+                    cpu: 10
+                }
             });
 
             // Wait for task processing
@@ -211,24 +392,74 @@ describe('TaskScheduler', () => {
     });
 
     describe('Task Cancellation', () => {
-        it('should cancel running tasks', async () => {
+        it('should cancel running tasks and release resources', async () => {
             const taskId = taskScheduler.addTask({
                 id: 'task-1',
                 agentId: 'agent-1',
                 priority: 1,
                 estimatedMemory: 1024 * 1024,
-                maxRetries: 3
+                maxRetries: 3,
+                resourceRequirements: {
+                    memory: 1024 * 1024,
+                    cpu: 10
+                }
             });
 
             // Wait for task to start
             await new Promise(resolve => setTimeout(resolve, 200));
 
-            const cancelled = taskScheduler.cancelTask(taskId);
+            const cancelled = await taskScheduler.cancelTask(taskId);
             expect(cancelled).toBe(true);
 
             const task = taskScheduler.getTaskStatus(taskId);
             expect(task?.status).toBe('failed');
             expect(task?.error?.message).toBe('Task cancelled');
+
+            const reservations = (resourceManager as any).resourceReservations;
+            expect(reservations.has(taskId)).toBe(false);
+        });
+
+        it('should notify remote agent when cancelling remote task', async () => {
+            const mockAgent = {
+                id: 'remote-1',
+                capabilities: {
+                    resourceCapacity: {
+                        memory: 16 * 1024 * 1024 * 1024,
+                        cpu: 100
+                    }
+                }
+            };
+
+            vi.spyOn(agentCommunication, 'findBestNodeForTask').mockReturnValue(mockAgent);
+            vi.spyOn(agentCommunication, 'assignTask').mockResolvedValue(true);
+            const sendMessageSpy = vi.spyOn(agentCommunication, 'sendMessage').mockResolvedValue();
+
+            const taskId = taskScheduler.addTask({
+                id: 'remote-cancel-task',
+                agentId: 'remote-1',
+                priority: 1,
+                estimatedMemory: 1024 * 1024,
+                maxRetries: 3,
+                distributionPreference: 'remote',
+                resourceRequirements: {
+                    memory: 1024 * 1024,
+                    cpu: 10
+                }
+            });
+
+            // Wait for task assignment
+            await new Promise(resolve => setTimeout(resolve, 200));
+
+            await taskScheduler.cancelTask(taskId);
+
+            expect(sendMessageSpy).toHaveBeenCalledWith(expect.objectContaining({
+                type: 'request',
+                target: 'remote-1',
+                payload: expect.objectContaining({
+                    action: 'cancel',
+                    taskId
+                })
+            }));
         });
 
         it('should not cancel completed tasks', async () => {
@@ -237,13 +468,17 @@ describe('TaskScheduler', () => {
                 agentId: 'agent-1',
                 priority: 1,
                 estimatedMemory: 1024 * 1024,
-                maxRetries: 3
+                maxRetries: 3,
+                resourceRequirements: {
+                    memory: 1024 * 1024,
+                    cpu: 10
+                }
             });
 
             // Wait for task completion
             await new Promise(resolve => setTimeout(resolve, 1000));
 
-            const cancelled = taskScheduler.cancelTask(taskId);
+            const cancelled = await taskScheduler.cancelTask(taskId);
             expect(cancelled).toBe(false);
         });
     });
