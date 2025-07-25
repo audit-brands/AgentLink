@@ -8,28 +8,36 @@ import {
     WorkflowEvent,
     WorkflowCondition,
     WorkflowRollback,
-    WorkflowPriority
+    WorkflowPriority,
+    WorkflowExecutionOptions
 } from '../types/workflow';
 import { WorkflowMetricsService } from './workflowMetrics';
 import { EnhancedResourceManager } from './enhancedResourceManager';
+import { TaskScheduler } from './taskScheduler';
 
 /**
- * Enhanced workflow engine with resource monitoring and metrics
+ * Enhanced workflow engine with distributed execution support
  */
 export class WorkflowEngine extends EventEmitter {
     private workflows: Map<string, WorkflowState> = new Map();
     private rollbackHandlers: Map<string, WorkflowRollback> = new Map();
     private metricsService: WorkflowMetricsService;
+    private taskScheduler: TaskScheduler;
 
-    constructor(resourceManager: EnhancedResourceManager) {
+    constructor(resourceManager: EnhancedResourceManager, taskScheduler: TaskScheduler) {
         super();
         this.metricsService = new WorkflowMetricsService(resourceManager);
+        this.taskScheduler = taskScheduler;
+        this.setupTaskListeners();
     }
 
     /**
      * Creates a new workflow instance
      */
-    public createWorkflow(definition: WorkflowDefinition): string {
+    public createWorkflow(
+        definition: WorkflowDefinition,
+        options: WorkflowExecutionOptions = {}
+    ): string {
         const workflowId = uuidv4();
         const state: WorkflowState = {
             id: workflowId,
@@ -37,7 +45,8 @@ export class WorkflowEngine extends EventEmitter {
             status: WorkflowStatus.PENDING,
             currentStep: 0,
             steps: [],
-            variables: {},
+            variables: definition.variables || {},
+            priority: options.priority || WorkflowPriority.NORMAL,
             createdAt: new Date(),
             updatedAt: new Date()
         };
@@ -70,155 +79,239 @@ export class WorkflowEngine extends EventEmitter {
     }
 
     /**
-     * Executes workflow steps with resource monitoring
+     * Executes workflow steps with distributed resource management
      */
     private async executeWorkflow(workflow: WorkflowState): Promise<void> {
         const { definition } = workflow;
+        const maxConcurrent = definition.maxConcurrentSteps || 1;
+        const runningSteps = new Set<string>();
 
-        while (workflow.currentStep < definition.steps.length && workflow.status === WorkflowStatus.RUNNING) {
-            const step = definition.steps[workflow.currentStep];
+        while (workflow.currentStep < definition.steps.length && 
+               workflow.status === WorkflowStatus.RUNNING) {
             
-            try {
-                // Check resource requirements
-                if (step.resourceRequirements) {
-                    const { warnings, critical } = this.metricsService.checkResourceWarnings(workflow.id);
-                    
-                    for (const warning of warnings) {
-                        this.emit('workflow:resource:warning', { 
-                            workflowId: workflow.id,
-                            message: warning
-                        });
-                    }
+            // Get next executable steps (considering dependencies and resource limits)
+            const executableSteps = await this.getExecutableSteps(
+                workflow,
+                maxConcurrent - runningSteps.size
+            );
 
-                    for (const criticalError of critical) {
-                        this.emit('workflow:resource:critical', {
-                            workflowId: workflow.id,
-                            message: criticalError
-                        });
-                        
-                        if (step.resourceRequirements.priority !== WorkflowPriority.CRITICAL) {
-                            throw new Error(`Resource limits exceeded: ${criticalError}`);
-                        }
-                    }
-                }
-
-                // Check step conditions
-                if (step.condition && !await this.evaluateCondition(step.condition, workflow)) {
-                    workflow.currentStep++;
+            if (executableSteps.length === 0) {
+                // Wait for running steps to complete
+                if (runningSteps.size > 0) {
+                    await new Promise(resolve => setTimeout(resolve, 100));
                     continue;
                 }
-
-                // Execute step
-                const result = await this.executeStep(step, workflow);
-                workflow.steps.push({
-                    stepId: step.id,
-                    status: WorkflowStatus.COMPLETED,
-                    result,
-                    error: null,
-                    startedAt: new Date(),
-                    completedAt: new Date()
-                });
-
-                // Store result in workflow variables if specified
-                if (step.outputVariable) {
-                    workflow.variables[step.outputVariable] = result;
-                }
-
-                workflow.currentStep++;
-                workflow.updatedAt = new Date();
-                await this.metricsService.updateMetrics(workflow.id, workflow);
-                this.emit('workflow:step:completed', { workflowId: workflow.id, step, result });
-
-            } catch (error) {
-                const stepState = {
-                    stepId: step.id,
-                    status: WorkflowStatus.FAILED,
-                    result: null,
-                    error: error instanceof Error ? error.message : String(error),
-                    startedAt: new Date(),
-                    completedAt: new Date()
-                };
-                workflow.steps.push(stepState);
-                
-                this.emit('workflow:step:failed', { 
-                    workflowId: workflow.id, 
-                    step,
-                    error: stepState.error
-                });
-
-                // Handle step failure
-                if (step.errorHandler) {
-                    try {
-                        await step.errorHandler(error, workflow);
-                    } catch (handlerError) {
-                        console.error('Error handler failed:', handlerError);
-                    }
-                }
-
-                // Retry logic
-                if (step.retryPolicy && (!step.attempts || step.attempts < step.retryPolicy.maxAttempts)) {
-                    step.attempts = (step.attempts || 0) + 1;
-                    const delay = Math.min(
-                        step.retryPolicy.maxDelay,
-                        1000 * Math.pow(step.retryPolicy.backoffMultiplier, step.attempts - 1)
-                    );
-                    
-                    this.emit('workflow:step:retrying', {
-                        workflowId: workflow.id,
-                        step,
-                        attempt: step.attempts
-                    });
-
-                    await new Promise(resolve => setTimeout(resolve, delay));
-                    continue;
-                }
-
-                if (step.continueOnError) {
-                    workflow.currentStep++;
-                    continue;
-                }
-
-                throw error;
+                // No more steps to execute
+                break;
             }
+
+            // Execute steps in parallel if allowed
+            const stepPromises = executableSteps.map(step => {
+                runningSteps.add(step.id);
+                return this.executeStep(step, workflow).finally(() => {
+                    runningSteps.delete(step.id);
+                });
+            });
+
+            try {
+                await Promise.all(stepPromises);
+                workflow.currentStep += executableSteps.length;
+            } catch (error) {
+                if (!workflow.definition.continueOnError) {
+                    throw error;
+                }
+                // Log error but continue with next steps
+                console.error('Step execution failed:', error);
+            }
+
+            workflow.updatedAt = new Date();
+            await this.metricsService.updateMetrics(workflow.id, workflow);
         }
 
         if (workflow.status === WorkflowStatus.RUNNING) {
-            // Only complete if not cancelled or failed
             workflow.status = WorkflowStatus.COMPLETED;
             workflow.updatedAt = new Date();
             await this.metricsService.updateMetrics(workflow.id, workflow);
-            this.workflows.set(workflow.id, workflow);
             this.emit('workflow:completed', { workflowId: workflow.id, workflow });
         }
     }
 
     /**
-     * Evaluates workflow conditions
+     * Gets executable steps considering dependencies and resources
      */
-    private async evaluateCondition(condition: WorkflowCondition, workflow: WorkflowState): Promise<boolean> {
-        try {
-            return await condition(workflow.variables);
-        } catch (error) {
-            console.error('Condition evaluation failed:', error);
-            return false;
+    private async getExecutableSteps(
+        workflow: WorkflowState,
+        limit: number
+    ): Promise<WorkflowStep[]> {
+        const { steps } = workflow.definition;
+        const executableSteps: WorkflowStep[] = [];
+        const startIndex = workflow.currentStep;
+
+        for (let i = startIndex; i < steps.length && executableSteps.length < limit; i++) {
+            const step = steps[i];
+            
+            // Check dependencies
+            if (step.dependencies?.length) {
+                const dependenciesMet = step.dependencies.every(depId => {
+                    const depStep = workflow.steps.find(s => s.stepId === depId);
+                    return depStep?.status === WorkflowStatus.COMPLETED;
+                });
+                if (!dependenciesMet) continue;
+            }
+
+            // Check resource availability
+            if (step.resourceRequirements) {
+                const canExecute = await this.taskScheduler.canExecuteTask({
+                    id: step.id,
+                    agentId: 'workflow',
+                    priority: step.resourceRequirements.priority || WorkflowPriority.NORMAL,
+                    estimatedMemory: step.resourceRequirements.memory,
+                    resourceRequirements: {
+                        memory: step.resourceRequirements.memory,
+                        cpu: step.resourceRequirements.cpu
+                    }
+                });
+                if (!canExecute) continue;
+            }
+
+            executableSteps.push(step);
         }
+
+        return executableSteps;
     }
 
     /**
-     * Executes a single workflow step
+     * Executes a workflow step
      */
-    private async executeStep(step: WorkflowStep, workflow: WorkflowState): Promise<unknown> {
+    private async executeStep(step: WorkflowStep, workflow: WorkflowState): Promise<void> {
         // Register rollback handler if provided
         if (step.rollback) {
             this.rollbackHandlers.set(step.id, step.rollback);
         }
 
+        const stepState = {
+            stepId: step.id,
+            status: WorkflowStatus.RUNNING,
+            result: null,
+            error: null,
+            startedAt: new Date(),
+            completedAt: new Date(),
+            attempts: 0
+        };
+
+        workflow.steps.push(stepState);
+        this.emit('workflow:step:started', { workflowId: workflow.id, step });
+
         try {
-            this.emit('workflow:step:started', { workflowId: workflow.id, step });
-            return await step.execute(workflow.variables);
+            let result;
+            if (step.resourceRequirements) {
+                // Execute as a distributed task
+                result = await this.executeDistributedStep(step, workflow);
+            } else {
+                // Execute locally
+                result = await step.execute(workflow.variables);
+            }
+
+            stepState.status = WorkflowStatus.COMPLETED;
+            stepState.result = result;
+            stepState.completedAt = new Date();
+
+            // Store result in workflow variables if specified
+            if (step.outputVariable) {
+                workflow.variables[step.outputVariable] = result;
+            }
+
+            this.emit('workflow:step:completed', {
+                workflowId: workflow.id,
+                step,
+                result
+            });
         } catch (error) {
-            throw error;
+            stepState.status = WorkflowStatus.FAILED;
+            stepState.error = error instanceof Error ? error.message : String(error);
+            stepState.completedAt = new Date();
+
+            this.emit('workflow:step:failed', {
+                workflowId: workflow.id,
+                step,
+                error: stepState.error
+            });
+
+            if (step.errorHandler) {
+                try {
+                    await step.errorHandler(error, workflow);
+                } catch (handlerError) {
+                    console.error('Error handler failed:', handlerError);
+                }
+            }
+
+            // Handle retries
+            if (step.retryPolicy && stepState.attempts < step.retryPolicy.maxAttempts) {
+                stepState.attempts++;
+                const delay = Math.min(
+                    step.retryPolicy.maxDelay,
+                    1000 * Math.pow(step.retryPolicy.backoffMultiplier, stepState.attempts - 1)
+                );
+
+                this.emit('workflow:step:retrying', {
+                    workflowId: workflow.id,
+                    step,
+                    attempt: stepState.attempts
+                });
+
+                await new Promise(resolve => setTimeout(resolve, delay));
+                return this.executeStep(step, workflow);
+            }
+
+            if (!step.continueOnError) {
+                throw error;
+            }
         }
+    }
+
+    /**
+     * Executes a step as a distributed task
+     */
+    private async executeDistributedStep(
+        step: WorkflowStep,
+        workflow: WorkflowState
+    ): Promise<unknown> {
+        return new Promise((resolve, reject) => {
+            const taskId = this.taskScheduler.addTask({
+                id: step.id,
+                agentId: 'workflow',
+                priority: step.resourceRequirements?.priority || WorkflowPriority.NORMAL,
+                estimatedMemory: step.resourceRequirements?.memory || 0,
+                resourceRequirements: {
+                    memory: step.resourceRequirements?.memory || 0,
+                    cpu: step.resourceRequirements?.cpu || 0,
+                    timeoutMs: step.timeout
+                },
+                distributionPreference: 'any'
+            });
+
+            const cleanup = () => {
+                this.taskScheduler.removeListener('task:completed', handleComplete);
+                this.taskScheduler.removeListener('task:failed', handleError);
+            };
+
+            const handleComplete = (task: any) => {
+                if (task.id === taskId) {
+                    cleanup();
+                    resolve(task.result);
+                }
+            };
+
+            const handleError = (task: any) => {
+                if (task.id === taskId) {
+                    cleanup();
+                    reject(task.error);
+                }
+            };
+
+            this.taskScheduler.on('task:completed', handleComplete);
+            this.taskScheduler.on('task:failed', handleError);
+        });
     }
 
     /**
@@ -228,7 +321,6 @@ export class WorkflowEngine extends EventEmitter {
         workflow.error = error instanceof Error ? error.message : String(error);
         workflow.updatedAt = new Date();
 
-        // Initiate rollback if enabled
         if (workflow.definition.rollbackOnError) {
             await this.rollbackWorkflow(workflow);
         } else {
@@ -236,7 +328,7 @@ export class WorkflowEngine extends EventEmitter {
             await this.metricsService.updateMetrics(workflow.id, workflow);
         }
 
-        this.emit('workflow:failed', { 
+        this.emit('workflow:failed', {
             workflowId: workflow.id,
             workflow,
             error: workflow.error
@@ -258,7 +350,7 @@ export class WorkflowEngine extends EventEmitter {
             if (rollbackHandler) {
                 try {
                     await rollbackHandler(workflow.variables);
-                    this.emit('workflow:step:rolledback', { 
+                    this.emit('workflow:step:rolledback', {
                         workflowId: workflow.id,
                         stepId: step.stepId
                     });
@@ -343,15 +435,34 @@ export class WorkflowEngine extends EventEmitter {
         await this.metricsService.updateMetrics(workflow.id, workflow);
         this.emit('workflow:cancelled', { workflowId, workflow });
 
-        // Initiate rollback if enabled
+        // Cancel any running tasks
+        const runningSteps = workflow.steps.filter(s => s.status === WorkflowStatus.RUNNING);
+        for (const step of runningSteps) {
+            await this.taskScheduler.cancelTask(step.stepId);
+        }
+
         if (workflow.definition.rollbackOnCancel) {
             const originalStatus = workflow.status;
             await this.rollbackWorkflow(workflow);
-            workflow.status = originalStatus; // Restore CANCELLED status after rollback
+            workflow.status = originalStatus;
             workflow.updatedAt = new Date();
             await this.metricsService.updateMetrics(workflow.id, workflow);
         }
 
         this.metricsService.cleanup(workflow.id);
+    }
+
+    private setupTaskListeners(): void {
+        this.taskScheduler.on('task:started', (task) => {
+            this.emit('task:started', task);
+        });
+
+        this.taskScheduler.on('task:completed', (task) => {
+            this.emit('task:completed', task);
+        });
+
+        this.taskScheduler.on('task:failed', (task) => {
+            this.emit('task:failed', task);
+        });
     }
 }
