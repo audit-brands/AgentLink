@@ -10,7 +10,10 @@ export class ResourceAwareTaskRouter extends EventEmitter {
     }
 
     public async routeTask(task: Task, agentId: string): Promise<void> {
-        this.tasks.set(task.id, task);
+        this.tasks.set(task.id, {
+            ...task,
+            targetAgent: agentId
+        });
         this.emit('task:assigned', task.id, agentId);
     }
 
@@ -43,5 +46,17 @@ export class ResourceAwareTaskRouter extends EventEmitter {
     public getRunningTasks(): Task[] {
         return Array.from(this.tasks.values())
             .filter(task => task.status === 'running');
+    }
+
+    public getTasksByAgent(agentId: string): Task[] {
+        return Array.from(this.tasks.values())
+            .filter(task => task.targetAgent === agentId);
+    }
+
+    public clearAgentTasks(agentId: string): void {
+        const agentTasks = this.getTasksByAgent(agentId);
+        agentTasks.forEach(task => {
+            this.failTask(task.id, new Error('Agent disconnected'));
+        });
     }
 }

@@ -11,6 +11,7 @@ export interface Task {
         cpu: number;
     };
     status: 'pending' | 'assigned' | 'running' | 'completed' | 'failed';
+    targetAgent?: string;
 }
 
 export interface Agent {
@@ -79,13 +80,32 @@ export class EnhancedOrchestrator extends EventEmitter {
     }
 
     public registerAgent(agent: Agent): void {
-        this.agents.set(agent.id, agent);
+        this.agents.set(agent.id, {
+            ...agent,
+            status: 'available',
+            currentLoad: {
+                memory: 0,
+                cpu: 0
+            }
+        });
         this.emit('agent:registered', agent.id);
     }
 
     public deregisterAgent(agentId: string): void {
-        this.agents.delete(agentId);
-        this.emit('agent:deregistered', agentId);
+        const agent = this.agents.get(agentId);
+        if (agent) {
+            // Clear tasks assigned to this agent
+            this.taskRouter.clearAgentTasks(agentId);
+            
+            // Remove agent from registry
+            this.agents.delete(agentId);
+            this.emit('agent:deregistered', agentId);
+
+            // Try to redistribute any pending tasks
+            Array.from(this.tasks.values())
+                .filter(task => task.status === 'pending')
+                .forEach(task => this.routeTask(task.id));
+        }
     }
 
     private async routeTask(taskId: string): Promise<void> {
@@ -113,6 +133,18 @@ export class EnhancedOrchestrator extends EventEmitter {
         // Route task to the most suitable agent
         const selectedAgent = this.selectBestAgent(availableAgents, task);
         if (selectedAgent) {
+            // Update task with target agent
+            task.targetAgent = selectedAgent.id;
+            this.tasks.set(taskId, task);
+
+            // Update agent status and load
+            selectedAgent.status = 'busy';
+            selectedAgent.currentLoad = {
+                memory: selectedAgent.currentLoad.memory + task.resourceRequirements.memory,
+                cpu: selectedAgent.currentLoad.cpu + task.resourceRequirements.cpu
+            };
+            this.agents.set(selectedAgent.id, selectedAgent);
+
             await this.taskRouter.routeTask(task, selectedAgent.id);
             this.updateTaskStatus(taskId, 'assigned');
         }
@@ -159,13 +191,51 @@ export class EnhancedOrchestrator extends EventEmitter {
     }
 
     private handleTaskCompletion(taskId: string): void {
+        const task = this.tasks.get(taskId);
+        if (task && task.targetAgent) {
+            // Update agent status and load
+            const agent = this.agents.get(task.targetAgent);
+            if (agent) {
+                agent.status = 'available';
+                agent.currentLoad = {
+                    memory: Math.max(0, agent.currentLoad.memory - task.resourceRequirements.memory),
+                    cpu: Math.max(0, agent.currentLoad.cpu - task.resourceRequirements.cpu)
+                };
+                this.agents.set(task.targetAgent, agent);
+            }
+        }
+
         this.updateTaskStatus(taskId, 'completed');
         this.emit('task:completed', taskId);
+
+        // Try to route any pending tasks
+        Array.from(this.tasks.values())
+            .filter(t => t.status === 'pending')
+            .forEach(t => this.routeTask(t.id));
     }
 
     private handleTaskFailure(taskId: string, error: Error): void {
+        const task = this.tasks.get(taskId);
+        if (task && task.targetAgent) {
+            // Update agent status and load
+            const agent = this.agents.get(task.targetAgent);
+            if (agent) {
+                agent.status = 'available';
+                agent.currentLoad = {
+                    memory: Math.max(0, agent.currentLoad.memory - task.resourceRequirements.memory),
+                    cpu: Math.max(0, agent.currentLoad.cpu - task.resourceRequirements.cpu)
+                };
+                this.agents.set(task.targetAgent, agent);
+            }
+        }
+
         this.updateTaskStatus(taskId, 'failed');
         this.emit('task:failed', taskId, error);
+
+        // Try to route any pending tasks
+        Array.from(this.tasks.values())
+            .filter(t => t.status === 'pending')
+            .forEach(t => this.routeTask(t.id));
     }
 
     public getTaskStatus(taskId: string): Task['status'] | undefined {
@@ -184,7 +254,7 @@ export class EnhancedOrchestrator extends EventEmitter {
             resources: metrics,
             utilization,
             activeTaskCount: Array.from(this.tasks.values())
-                .filter(task => task.status === 'running').length,
+                .filter(task => task.status === 'running' || task.status === 'assigned').length,
             availableAgents: Array.from(this.agents.values())
                 .filter(agent => agent.status === 'available').length,
             totalAgents: this.agents.size
