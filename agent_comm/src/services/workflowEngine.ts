@@ -239,7 +239,11 @@ export class WorkflowEngine extends EventEmitter {
 
         // Initiate rollback if enabled
         if (workflow.definition.rollbackOnError) {
+            const originalStatus = workflow.status;
             await this.rollbackWorkflow(workflow);
+            workflow.status = originalStatus; // Restore FAILED status after rollback
+            workflow.updatedAt = new Date();
+            await this.metricsService.updateMetrics(workflow.id, workflow);
         }
     }
 
