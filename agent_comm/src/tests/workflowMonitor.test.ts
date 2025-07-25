@@ -11,7 +11,39 @@ describe('WorkflowMonitor', () => {
     let mockResponse: Partial<Response>;
 
     beforeEach(() => {
-        workflowEngine = new WorkflowEngine();
+        const mockResourceManager = {
+            getEnhancedMetrics: vi.fn().mockResolvedValue({
+                memory: {
+                    total: 1024 * 1024 * 1024,
+                    used: 512 * 1024 * 1024,
+                    free: 512 * 1024 * 1024,
+                    processUsage: 512 * 1024 * 1024,
+                    heapUsage: 512 * 1024 * 1024
+                },
+                cpu: {
+                    usage: 50,
+                    loadAvg: [50, 50, 50],
+                    processUsage: 50
+                },
+                storage: {
+                    used: 0,
+                    free: 1000
+                },
+                availableResources: {
+                    memory: 512 * 1024 * 1024,
+                    cpu: 30
+                },
+                utilizationPercentages: {
+                    memory: 50,
+                    cpu: 50
+                }
+            }),
+            getResourceUtilization: vi.fn().mockReturnValue({
+                memory: 50,
+                cpu: 50
+            })
+        };
+        workflowEngine = new WorkflowEngine(mockResourceManager);
         workflowMonitor = new WorkflowMonitor(workflowEngine);
 
         // Mock request object with event handling

@@ -137,13 +137,18 @@ export class AuditLogger extends EventEmitter {
         const serialized = JSON.stringify(entry) + '\n';
         const size = Buffer.from(serialized).length;
 
+        // Check if adding this entry would exceed the limit
         if (this.currentFileSize + size > this.options.maxFileSize) {
             await this.rotateLog();
         }
 
         // In a real implementation, this would write to a file or database
         console.log('Audit Log:', serialized);
-        this.currentFileSize += size; // Accumulate file size
+        
+        // Update size only if we haven't rotated
+        if (this.currentFileSize + size <= this.options.maxFileSize) {
+            this.currentFileSize += size;
+        }
     }
 
     private initializeLogFile(): string {
@@ -153,7 +158,7 @@ export class AuditLogger extends EventEmitter {
 
     private async rotateLog(): Promise<void> {
         this.currentLogFile = this.initializeLogFile();
-        this.currentFileSize = 0;
+        this.currentFileSize = 0; // Reset size after rotation
         this.emit('audit:rotated', this.currentLogFile);
     }
 

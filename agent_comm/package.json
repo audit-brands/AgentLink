@@ -27,8 +27,13 @@
     "vitest": "^1.0.0"
   },
   "dependencies": {
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/ws": "^8.18.1",
     "axios": "^1.10.0",
     "express": "^5.1.0",
-    "uuid": "^9.0.0"
+    "jsonwebtoken": "^9.0.2",
+    "mdns-js": "^1.0.3",
+    "uuid": "^9.0.0",
+    "ws": "^8.18.3"
   }
 }
