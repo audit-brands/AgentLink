@@ -54,12 +54,14 @@ export interface ResourceRequest {
 }
 
 export class EnhancedResourceManager extends EventEmitter {
-    private readonly limits: ResourceLimits;
+    public readonly limits: ResourceLimits;
     private reservedResources: Map<string, ResourceRequest>;
     private metricsInterval: NodeJS.Timer | null;
     private clusterNodes: Map<string, ResourceMetrics>;
     private lastCpuUsage: { user: number; system: number } | null;
     private lastCpuTime: number;
+    private readonly totalMemory: number;
+    private readonly totalCpu: number;
 
     constructor(limits: ResourceLimits) {
         super();
@@ -69,6 +71,8 @@ export class EnhancedResourceManager extends EventEmitter {
         this.metricsInterval = null;
         this.lastCpuUsage = null;
         this.lastCpuTime = Date.now();
+        this.totalMemory = os.totalmem();
+        this.totalCpu = 100; // 100% CPU
         
         // Start metrics monitoring
         this.start();
@@ -113,10 +117,22 @@ export class EnhancedResourceManager extends EventEmitter {
         const metrics = await this.getEnhancedMetrics();
         const { availableResources } = metrics;
 
-        return (
-            availableResources.memory >= request.memory &&
-            availableResources.cpu >= request.cpu
-        );
+        // Check if we have enough free resources
+        const hasEnoughMemory = availableResources.memory >= request.memory;
+        const hasEnoughCpu = availableResources.cpu >= request.cpu;
+
+        // Check if allocation would exceed limits
+        const totalReservedMemory = Array.from(this.reservedResources.values())
+            .reduce((sum, req) => sum + req.memory, 0);
+        const totalReservedCpu = Array.from(this.reservedResources.values())
+            .reduce((sum, req) => sum + req.cpu, 0);
+
+        const wouldExceedMemoryLimit = 
+            (totalReservedMemory + request.memory) / this.totalMemory * 100 > this.limits.memory.max;
+        const wouldExceedCpuLimit = 
+            totalReservedCpu + request.cpu > this.limits.cpu.maxUsage;
+
+        return hasEnoughMemory && hasEnoughCpu && !wouldExceedMemoryLimit && !wouldExceedCpuLimit;
     }
 
     /**
@@ -128,6 +144,36 @@ export class EnhancedResourceManager extends EventEmitter {
     ): Promise<boolean> {
         if (await this.canHandleTask(request)) {
             this.reservedResources.set(taskId, request);
+
+            // Check if this reservation puts us over warning thresholds
+            const totalReservedMemory = Array.from(this.reservedResources.values())
+                .reduce((sum, req) => sum + req.memory, 0);
+            const totalReservedCpu = Array.from(this.reservedResources.values())
+                .reduce((sum, req) => sum + req.cpu, 0);
+
+            const memoryPercentage = (totalReservedMemory / this.totalMemory) * 100;
+            if (memoryPercentage >= this.limits.memory.warning) {
+                this.emit('alert', {
+                    type: 'memory',
+                    level: memoryPercentage >= this.limits.memory.max ? 'critical' : 'warning',
+                    message: `Memory usage at ${memoryPercentage.toFixed(1)}%`,
+                    value: totalReservedMemory,
+                    threshold: this.limits.memory.warning,
+                    timestamp: new Date()
+                });
+            }
+
+            if (totalReservedCpu >= this.limits.cpu.warning) {
+                this.emit('alert', {
+                    type: 'cpu',
+                    level: totalReservedCpu >= this.limits.cpu.maxUsage ? 'critical' : 'warning',
+                    message: `CPU usage at ${totalReservedCpu.toFixed(1)}%`,
+                    value: totalReservedCpu,
+                    threshold: this.limits.cpu.warning,
+                    timestamp: new Date()
+                });
+            }
+
             return true;
         }
         return false;
@@ -151,7 +197,7 @@ export class EnhancedResourceManager extends EventEmitter {
             .reduce((sum, req) => sum + req.cpu, 0);
 
         return {
-            memory: (totalReservedMemory / this.limits.memory.max) * 100,
+            memory: (totalReservedMemory / this.totalMemory) * 100,
             cpu: totalReservedCpu
         };
     }
@@ -182,7 +228,7 @@ export class EnhancedResourceManager extends EventEmitter {
     }
 
     private async collectLocalMetrics(): Promise<ResourceMetrics> {
-        const totalMemory = os.totalmem();
+        const totalMemory = this.totalMemory;
         const freeMemory = os.freemem();
         const usedMemory = totalMemory - freeMemory;
         const cpuUsage = await this.getCpuUsage();
@@ -213,7 +259,7 @@ export class EnhancedResourceManager extends EventEmitter {
             },
             availableResources: {
                 memory: Math.max(0, freeMemory - totalReservedMemory),
-                cpu: Math.max(0, 100 - cpuUsage - totalReservedCpu)
+                cpu: Math.max(0, this.totalCpu - cpuUsage - totalReservedCpu)
             },
             utilizationPercentages: {
                 memory: (usedMemory / totalMemory) * 100,
@@ -257,29 +303,11 @@ export class EnhancedResourceManager extends EventEmitter {
     }
 
     private aggregateClusterMetrics(): ResourceMetrics['clusterMetrics'] {
-        let totalMemory = 0;
-        let totalCpu = 0;
-        let availableMemory = 0;
-        let availableCpu = 0;
-        let activeNodes = 0;
-
-        // Include local node in calculations
-        const localMetrics = {
-            memory: {
-                total: os.totalmem(),
-                free: os.freemem()
-            },
-            cpu: {
-                usage: 0 // Will be updated with actual usage
-            }
-        };
-
-        // Add local node metrics
-        totalMemory += localMetrics.memory.total;
-        totalCpu += 100; // Local node has 100% CPU
-        availableMemory += localMetrics.memory.free;
-        availableCpu += (100 - localMetrics.cpu.usage);
-        activeNodes += 1;
+        let totalMemory = this.totalMemory;
+        let totalCpu = this.totalCpu;
+        let availableMemory = os.freemem();
+        let availableCpu = this.totalCpu;
+        let activeNodes = 1; // Local node is always active
 
         // Add remote node metrics
         for (const metrics of this.clusterNodes.values()) {
