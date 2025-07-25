@@ -2,8 +2,11 @@ import express from 'express';
 import { Request, Response } from 'express';
 import { exec } from 'child_process';
 import path from 'path';
-import fs from 'fs';
+import { promisify } from 'util';
 import { agentRegistry } from './registry';
+import { AgentStatus, RegisteredAgent, AgentCapability } from './types/orchestration';
+
+const execAsync = promisify(exec);
 
 interface JsonRpcRequest {
     jsonrpc: "2.0";
@@ -24,122 +27,171 @@ interface JsonRpcError extends Error {
     data?: any;
 }
 
-const app = express();
-const PORT = 5000;
+class ClaudeAgent {
+    private app = express();
+    private readonly PORT = 5000;
+    private status: AgentStatus = AgentStatus.ONLINE;
+    private capabilities: AgentCapability[] = [
+        {
+            name: "code-refactor",
+            methods: ["RequestRefactor"],
+            version: "1.0.0"
+        }
+    ];
 
-app.use(express.json());
+    constructor() {
+        this.setupMiddleware();
+        this.setupRoutes();
+    }
 
-function runClaudeCli(prompt: string): Promise<string | JsonRpcResponse> {
-    return new Promise((resolve) => {
-        const command = `${path.resolve(__dirname, '../claude-cli')} "${prompt}"`;
-        console.log(`[EXEC] Running Claude CLI command: ${command}`);
+    private setupMiddleware() {
+        this.app.use(express.json());
+        this.app.use((req, res, next) => {
+            console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+            next();
+        });
+    }
 
-        exec(command, (error, stdout, stderr) => {
+    private setupRoutes() {
+        this.app.post('/', this.handleJsonRpcRequest.bind(this));
+        this.app.get('/.well-known/agent.json', this.handleAgentInfo.bind(this));
+    }
+
+    private async runClaudeCli(prompt: string): Promise<string | JsonRpcResponse> {
+        try {
+            const cliPath = path.resolve(__dirname, '../claude-cli');
+            const command = `${cliPath} "${prompt}"`;
+            console.log(`[EXEC] Running Claude CLI command: ${command}`);
+
+            const { stdout, stderr } = await execAsync(command);
+            
             if (stderr) {
                 console.warn(`[EXEC] Claude CLI stderr: ${stderr}`);
             }
 
-            if (error) {
-                console.error(`[EXEC] Claude CLI execution error: ${error.message}`);
-                resolve({
-                    jsonrpc: "2.0",
-                    error: { code: -32000, message: "CLI execution error", data: stderr || error.message },
-                    id: null
-                });
-                return;
-            }
-
             try {
                 const jsonOutput = JSON.parse(stdout.trim());
-                if (jsonOutput && typeof jsonOutput === 'object' && jsonOutput.jsonrpc === '2.0' && jsonOutput.error) {
-                    resolve(jsonOutput); // It's a JSON-RPC error from the CLI
-                } else {
-                    resolve(stdout.trim());
+                if (jsonOutput?.jsonrpc === '2.0' && jsonOutput.error) {
+                    return jsonOutput;
                 }
-            } catch (e) {
-                resolve(stdout.trim()); // Not a JSON response, return as is
+                return stdout.trim();
+            } catch {
+                return stdout.trim();
             }
-        });
-    });
-}
-
-// JSON-RPC endpoint
-app.post('/', async (req: Request, res: Response) => {
-    const requestData = req.body;
-    console.log(`[DEBUG] Received request: ${JSON.stringify(requestData)}`);
-
-    let responseData: any = {};
-
-    if (requestData.jsonrpc !== "2.0") {
-        responseData = {
-            jsonrpc: "2.0",
-            error: { code: -32600, message: "Invalid Request", data: "jsonrpc must be \"2.0\"" },
-            id: requestData.id || null
-        };
-    } else if (typeof requestData.method !== "string") {
-        responseData = {
-            jsonrpc: "2.0",
-            error: { code: -32600, message: "Invalid Request", data: "method must be a string" },
-            id: requestData.id || null
-        };
-    } else if (requestData.method === "RequestRefactor") {
-        const params = requestData.params || {};
-        const messageId = requestData.id;
-
-        console.log(" New refactor task received for Claude!");
-        console.log(`[DEBUG] Code path: ${params.code_path}, Instruction: ${params.instruction}`);
-        
-        const output = await runClaudeCli(params.instruction);
-        if (typeof output === 'object' && output.jsonrpc === "2.0" && output.error) {
-            responseData = output;
-        } else {
-            responseData = {
+        } catch (error) {
+            console.error('[ERROR] Claude CLI execution failed:', error);
+            return {
                 jsonrpc: "2.0",
-                result: output,
-                id: messageId
+                error: {
+                    code: -32000,
+                    message: "CLI execution error",
+                    data: error instanceof Error ? error.message : String(error)
+                },
+                id: null
             };
         }
-    } else {
-        responseData = {
-            jsonrpc: "2.0",
-            error: { code: -32601, message: "Method not found" },
-            id: requestData.id || null
+    }
+
+    private async handleJsonRpcRequest(req: Request, res: Response) {
+        const requestData = req.body as JsonRpcRequest;
+        console.log(`[DEBUG] Received request: ${JSON.stringify(requestData)}`);
+
+        try {
+            if (this.status === AgentStatus.OFFLINE) {
+                throw { code: -32001, message: "Agent is offline" };
+            }
+
+            if (requestData.jsonrpc !== "2.0") {
+                throw { code: -32600, message: "Invalid Request", data: "jsonrpc must be \"2.0\"" };
+            }
+
+            if (typeof requestData.method !== "string") {
+                throw { code: -32600, message: "Invalid Request", data: "method must be a string" };
+            }
+
+            if (requestData.method === "RequestRefactor") {
+                this.status = AgentStatus.BUSY;
+                const params = requestData.params || {};
+                
+                if (!params.instruction) {
+                    throw { code: -32602, message: "Invalid params", data: "instruction is required" };
+                }
+
+                const output = await this.runClaudeCli(params.instruction);
+                
+                this.status = AgentStatus.ONLINE;
+                
+                if (typeof output === 'object' && 'jsonrpc' in output) {
+                    res.json(output);
+                } else {
+                    res.json({
+                        jsonrpc: "2.0",
+                        result: output,
+                        id: requestData.id
+                    });
+                }
+            } else {
+                throw { code: -32601, message: "Method not found" };
+            }
+        } catch (error) {
+            const jsonRpcError = error as JsonRpcError;
+            res.json({
+                jsonrpc: "2.0",
+                error: {
+                    code: jsonRpcError.code || -32603,
+                    message: jsonRpcError.message || "Internal error",
+                    data: jsonRpcError.data
+                },
+                id: requestData.id || null
+            });
+        }
+    }
+
+    private handleAgentInfo(req: Request, res: Response) {
+        const agentInfo: RegisteredAgent = {
+            id: "claude-agent",
+            name: "Claude CLI Agent",
+            endpoint: `http://localhost:${this.PORT}`,
+            capabilities: this.capabilities,
+            status: this.status,
+            lastSeen: new Date()
         };
-    }
 
-    res.json(responseData);
-    console.log(`[DEBUG] Sent response: ${JSON.stringify(responseData)}`);
-});
-
-// Serve .well-known/agent.json
-app.get('/.well-known/agent.json', (req: Request, res: Response) => {
-    const claudeAgentCard = agentRegistry.getAgent('claude-agent');
-    if (claudeAgentCard) {
         res.setHeader('Content-Type', 'application/json');
-        res.json(claudeAgentCard);
-    } else {
-        res.status(404).send("Agent card not found");
+        res.json(agentInfo);
     }
-});
 
-app.listen(PORT, async () => {
-    console.log(`Claude agent (Node.js HTTP Server) is running on http://localhost:${PORT}`);
-    const agentCard = {
-        id: "claude-agent",
-        capabilities: ["RequestRefactor"],
-        endpoint: `http://localhost:${PORT}`
-    };
-    agentRegistry.registerAgent(agentCard);
+    public start() {
+        this.app.listen(this.PORT, () => {
+            console.log(`Claude agent running on http://localhost:${this.PORT}`);
+            
+            const agentCard = {
+                id: "claude-agent",
+                name: "Claude CLI Agent",
+                capabilities: this.capabilities,
+                endpoint: `http://localhost:${this.PORT}`
+            };
+            
+            agentRegistry.registerAgent(agentCard);
 
-    // Periodic registration (heartbeat)
-    setInterval(() => {
-        agentRegistry.registerAgent(agentCard);
-    }, 30000); // Register every 30 seconds
+            setInterval(() => {
+                agentRegistry.registerAgent(agentCard);
+            }, 30000);
 
-    // Graceful shutdown
-    process.on('SIGINT', () => {
-        console.log('Claude agent shutting down...');
-        agentRegistry.deregisterAgent(agentCard.id);
-        process.exit();
-    });
-});
+            const shutdown = () => {
+                console.log('Claude agent shutting down...');
+                this.status = AgentStatus.OFFLINE;
+                agentRegistry.deregisterAgent(agentCard.id);
+                process.exit(0);
+            };
+
+            // Handle both SIGINT (Ctrl+C) and SIGTERM
+            process.on('SIGINT', shutdown);
+            process.on('SIGTERM', shutdown);
+        });
+    }
+}
+
+// Start the agent
+const claudeAgent = new ClaudeAgent();
+claudeAgent.start();
